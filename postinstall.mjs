@@ -167,6 +167,9 @@ const themeInlineBlock = `
   --radius-2xl: calc(var(--radius) + 8px);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
+  --shadow-sm: var(--ds-shadow-sm);
+  --shadow-md: var(--ds-shadow-md);
+  --shadow-lg: var(--ds-shadow-lg);
 }
 `;
 
