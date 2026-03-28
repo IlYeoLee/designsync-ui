@@ -337,18 +337,24 @@ try {
 
 // ── 5. Copy ESLint plugin + inject into eslint.config.js ─────────────
 const pluginSrc = path.join(__dirname, "eslint-plugin-designsync.mjs");
-const pluginDest = path.join(projectRoot, "eslint-plugin-designsync.mjs");
 
 if (fs.existsSync(pluginSrc)) {
-  fs.copyFileSync(pluginSrc, pluginDest);
-
   const eslintConfigPath = path.join(projectRoot, "eslint.config.js");
   if (fs.existsSync(eslintConfigPath)) {
     let eslintConfig = fs.readFileSync(eslintConfigPath, "utf-8");
     if (!eslintConfig.includes("designsync")) {
-      // Add import at top
-      const importLine = `import designsync from "./eslint-plugin-designsync.mjs";\n`;
-      const configBlock = `  { plugins: { designsync }, rules: { "designsync/no-raw-html": "error", "designsync/no-hardcoded-color": "error", "designsync/no-hardcoded-token": "warn" } },\n`;
+      // Check if project uses "type": "module" (ESM) — if so, use .cjs extension
+      const projPkg = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf-8"));
+      const isESM = projPkg.type === "module";
+      const pluginExt = isESM ? "cjs" : "mjs";
+      const pluginFileDest = path.join(projectRoot, `designsync-eslint.${pluginExt}`);
+      fs.copyFileSync(pluginSrc, pluginFileDest);
+
+      // For CJS in ESM projects, use createRequire
+      const importLine = isESM
+        ? `import { createRequire } from "module";\nconst __require = createRequire(import.meta.url);\nconst designsync = __require("./designsync-eslint.cjs");\n`
+        : `import designsync from "./designsync-eslint.mjs";\n`;
+      const configBlock = `  designsync,\n`;
 
       // Insert import after last import
       const lastImportIdx = eslintConfig.lastIndexOf("import ");
