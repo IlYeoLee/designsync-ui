@@ -170,6 +170,19 @@ const themeInlineBlock = `
   --shadow-sm: var(--ds-shadow-sm);
   --shadow-md: var(--ds-shadow-md);
   --shadow-lg: var(--ds-shadow-lg);
+  --text-xs: var(--font-size-xs, 0.75rem);
+  --text-sm: var(--font-size-sm, 0.875rem);
+  --text-base: var(--font-size-base, 1rem);
+  --text-lg: var(--font-size-lg, 1.125rem);
+  --text-xl: var(--font-size-xl, 1.25rem);
+  --text-2xl: var(--font-size-2xl, 1.5rem);
+  --text-3xl: var(--font-size-3xl, 1.875rem);
+  --text-4xl: var(--font-size-4xl, 2.25rem);
+  --text-5xl: var(--font-size-5xl, 3rem);
+  --leading-tight: var(--line-height-tight, 1.25);
+  --leading-normal: var(--line-height-normal, 1.5);
+  --leading-relaxed: var(--line-height-relaxed, 1.625);
+  --leading-loose: var(--line-height-loose, 1.75);
 }
 `;
 
