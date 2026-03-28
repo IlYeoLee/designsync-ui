@@ -554,7 +554,3 @@ module.exports = {
   },
 };
 
-// Also support ESM import
-if (typeof module !== "undefined" && module.exports) {
-  module.exports.default = module.exports;
-}
