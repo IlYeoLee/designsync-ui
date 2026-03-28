@@ -173,24 +173,39 @@ const themeInlineBlock = `
 const cssFile = findCssFile(projectRoot);
 if (cssFile && dsSlug) {
   const liveUrl = `${CDN}/r/${dsSlug}/designsync-tokens.css`;
-  const importLine = `@import url("${liveUrl}");`;
   let cssContent = fs.readFileSync(cssFile, "utf-8");
 
-  // Remove existing designsync-tokens import and theme block (if any)
+  // Remove old @import url(...designsync-tokens.css) if present (no longer used)
   cssContent = cssContent.replace(/^@import\s+url\(["'][^"']*designsync-tokens\.css["']\);?\s*\n?/m, "");
+  // Remove old theme block if present
   cssContent = cssContent.replace(/\/\* designsync-theme-start \*\/[\s\S]*?\/\* designsync-theme-end \*\/\s*\n?/m, "");
 
   const themeBlock = `/* designsync-theme-start */\n${themeInlineBlock}\n/* designsync-theme-end */`;
 
-  // Insert AFTER @import "tailwindcss": @import url FIRST (CSS spec requires @import before other rules), then @theme
+  // Insert @theme inline AFTER @import "tailwindcss"
   const tailwindImportRegex = /(@import\s+["']tailwindcss["'];?\s*\n?)/;
   if (tailwindImportRegex.test(cssContent)) {
-    cssContent = cssContent.replace(tailwindImportRegex, `$1${importLine}\n\n${themeBlock}\n`);
+    cssContent = cssContent.replace(tailwindImportRegex, `$1\n${themeBlock}\n`);
   } else {
-    // No tailwindcss import found — prepend
-    cssContent = importLine + "\n\n" + themeBlock + "\n" + cssContent;
+    cssContent = themeBlock + "\n" + cssContent;
   }
   fs.writeFileSync(cssFile, cssContent);
+
+  // Inject <link> tag into index.html for live token sync (works with all build tools)
+  const htmlCandidates = ["index.html", "public/index.html", "src/index.html"];
+  const linkTag = `<link rel="stylesheet" href="${liveUrl}" />`;
+  for (const htmlPath of htmlCandidates) {
+    const fullPath = path.join(projectRoot, htmlPath);
+    if (fs.existsSync(fullPath)) {
+      let html = fs.readFileSync(fullPath, "utf-8");
+      if (!html.includes("designsync-tokens.css")) {
+        html = html.replace("</head>", `    ${linkTag}\n  </head>`);
+        fs.writeFileSync(fullPath, html);
+      }
+      break;
+    }
+  }
+
   console.log("  [2/4] Live token sync + theme enabled");
 } else if (cssFile) {
   console.log("  [2/4] Skipped live sync (set DESIGNSYNC_SLUG env or create .designsync.json)");
