@@ -126,26 +126,72 @@ if (!dsSlug && fs.existsSync(dsConfigPath)) {
   } catch {}
 }
 
-// ── 3. Inject @import url(...) into CSS ─────────────────────────────
+// ── 3. Inject @theme inline + @import url(...) into CSS ──────────────
+const themeInlineBlock = `
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+`;
+
 const cssFile = findCssFile(projectRoot);
 if (cssFile && dsSlug) {
   const liveUrl = `${CDN}/r/${dsSlug}/designsync-tokens.css`;
   const importLine = `@import url("${liveUrl}");`;
   let cssContent = fs.readFileSync(cssFile, "utf-8");
 
-  // Remove existing designsync-tokens import (if any) to fix order
+  // Remove existing designsync-tokens import and theme block (if any)
   cssContent = cssContent.replace(/^@import\s+url\(["'][^"']*designsync-tokens\.css["']\);?\s*\n?/m, "");
+  cssContent = cssContent.replace(/\/\* designsync-theme-start \*\/[\s\S]*?\/\* designsync-theme-end \*\/\s*\n?/m, "");
 
-  // Insert AFTER @import "tailwindcss" so tokens override Tailwind defaults
+  const themeBlock = `/* designsync-theme-start */\n${themeInlineBlock}\n/* designsync-theme-end */`;
+
+  // Insert AFTER @import "tailwindcss": theme block first, then @import url
   const tailwindImportRegex = /(@import\s+["']tailwindcss["'];?\s*\n?)/;
   if (tailwindImportRegex.test(cssContent)) {
-    cssContent = cssContent.replace(tailwindImportRegex, `$1${importLine}\n`);
+    cssContent = cssContent.replace(tailwindImportRegex, `$1\n${themeBlock}\n${importLine}\n`);
   } else {
     // No tailwindcss import found — prepend
-    cssContent = importLine + "\n" + cssContent;
+    cssContent = themeBlock + "\n" + importLine + "\n" + cssContent;
   }
   fs.writeFileSync(cssFile, cssContent);
-  console.log("  [2/4] Live token sync enabled");
+  console.log("  [2/4] Live token sync + theme enabled");
 } else if (cssFile) {
   console.log("  [2/4] Skipped live sync (set DESIGNSYNC_SLUG env or create .designsync.json)");
 } else {
