@@ -134,7 +134,15 @@ if (cssFile && dsSlug) {
   let cssContent = fs.readFileSync(cssFile, "utf-8");
 
   if (!cssContent.includes("designsync-tokens.css")) {
-    fs.writeFileSync(cssFile, importLine + "\n" + cssContent);
+    // Insert AFTER @import "tailwindcss" so tokens override Tailwind defaults
+    const tailwindImportRegex = /(@import\s+["']tailwindcss["'];?\s*\n?)/;
+    if (tailwindImportRegex.test(cssContent)) {
+      cssContent = cssContent.replace(tailwindImportRegex, `$1${importLine}\n`);
+    } else {
+      // No tailwindcss import found — prepend
+      cssContent = importLine + "\n" + cssContent;
+    }
+    fs.writeFileSync(cssFile, cssContent);
     console.log("  [2/4] Live token sync enabled");
   } else {
     console.log("  [2/4] Live token sync already configured");
