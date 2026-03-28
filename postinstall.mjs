@@ -133,20 +133,19 @@ if (cssFile && dsSlug) {
   const importLine = `@import url("${liveUrl}");`;
   let cssContent = fs.readFileSync(cssFile, "utf-8");
 
-  if (!cssContent.includes("designsync-tokens.css")) {
-    // Insert AFTER @import "tailwindcss" so tokens override Tailwind defaults
-    const tailwindImportRegex = /(@import\s+["']tailwindcss["'];?\s*\n?)/;
-    if (tailwindImportRegex.test(cssContent)) {
-      cssContent = cssContent.replace(tailwindImportRegex, `$1${importLine}\n`);
-    } else {
-      // No tailwindcss import found — prepend
-      cssContent = importLine + "\n" + cssContent;
-    }
-    fs.writeFileSync(cssFile, cssContent);
-    console.log("  [2/4] Live token sync enabled");
+  // Remove existing designsync-tokens import (if any) to fix order
+  cssContent = cssContent.replace(/^@import\s+url\(["'][^"']*designsync-tokens\.css["']\);?\s*\n?/m, "");
+
+  // Insert AFTER @import "tailwindcss" so tokens override Tailwind defaults
+  const tailwindImportRegex = /(@import\s+["']tailwindcss["'];?\s*\n?)/;
+  if (tailwindImportRegex.test(cssContent)) {
+    cssContent = cssContent.replace(tailwindImportRegex, `$1${importLine}\n`);
   } else {
-    console.log("  [2/4] Live token sync already configured");
+    // No tailwindcss import found — prepend
+    cssContent = importLine + "\n" + cssContent;
   }
+  fs.writeFileSync(cssFile, cssContent);
+  console.log("  [2/4] Live token sync enabled");
 } else if (cssFile) {
   console.log("  [2/4] Skipped live sync (set DESIGNSYNC_SLUG env or create .designsync.json)");
 } else {
