@@ -182,13 +182,13 @@ if (cssFile && dsSlug) {
 
   const themeBlock = `/* designsync-theme-start */\n${themeInlineBlock}\n/* designsync-theme-end */`;
 
-  // Insert AFTER @import "tailwindcss": theme block first, then @import url
+  // Insert AFTER @import "tailwindcss": @import url FIRST (CSS spec requires @import before other rules), then @theme
   const tailwindImportRegex = /(@import\s+["']tailwindcss["'];?\s*\n?)/;
   if (tailwindImportRegex.test(cssContent)) {
-    cssContent = cssContent.replace(tailwindImportRegex, `$1\n${themeBlock}\n${importLine}\n`);
+    cssContent = cssContent.replace(tailwindImportRegex, `$1${importLine}\n\n${themeBlock}\n`);
   } else {
     // No tailwindcss import found — prepend
-    cssContent = themeBlock + "\n" + importLine + "\n" + cssContent;
+    cssContent = importLine + "\n\n" + themeBlock + "\n" + cssContent;
   }
   fs.writeFileSync(cssFile, cssContent);
   console.log("  [2/4] Live token sync + theme enabled");
