@@ -11,7 +11,7 @@ function Item({
     <div
       data-slot="item"
       className={cn(
-        "flex items-start gap-[var(--ds-internal-gap)] rounded-[var(--ds-element-radius)] p-[var(--ds-internal-gap)] transition-colors",
+        "flex items-center gap-[var(--ds-internal-gap)] p-[var(--ds-internal-gap)] transition-colors",
         className
       )}
       {...props}
