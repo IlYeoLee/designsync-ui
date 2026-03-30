@@ -444,7 +444,7 @@ const LIBRARY_PKG = {
   tabler:     "@tabler/icons-react",
   phosphor:   "@phosphor-icons/react",
   remix:      "@remixicon/react",
-  hugeicons:  "@hugeicons/react",
+  hugeicons:  "@hugeicons/core-free-icons",  // icons live here, not @hugeicons/react
 };
 
 // Detect slug from .designsync.json or env
