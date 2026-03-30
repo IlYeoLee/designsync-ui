@@ -589,8 +589,10 @@ if (cssFile && dsSlug) {
   const liveUrl = `${CDN}/r/${dsSlug}/designsync-tokens.css`;
   let cssContent = fs.readFileSync(cssFile, "utf-8");
 
-  cssContent = cssContent.replace(/^@import\s+url\(["'][^"']*designsync-tokens\.css["']\);?\s*\n?/m, "");
-  cssContent = cssContent.replace(/\/\* designsync-theme-start \*\/[\s\S]*?\/\* designsync-theme-end \*\/\s*\n?/m, "");
+  // Remove @import url(...) and all blank lines immediately following it
+  cssContent = cssContent.replace(/^@import\s+url\(["'][^"']*designsync-tokens\.css["']\)[^;\n]*;?[ \t]*\n([ \t]*\n)*/m, "");
+  // Remove theme block and all blank lines immediately following it
+  cssContent = cssContent.replace(/\/\* designsync-theme-start \*\/[\s\S]*?\/\* designsync-theme-end \*\/[ \t]*\n([ \t]*\n)*/m, "");
 
   // @import url() MUST come before any non-import CSS rules (CSS spec).
   // Tailwind v4 expands @import "tailwindcss" into utility classes at build time,
@@ -599,13 +601,14 @@ if (cssFile && dsSlug) {
   const liveImport = `@import url("${liveUrl}");\n`;
   const themeBlock = `/* designsync-theme-start */\n${themeInlineBlock}\n/* designsync-theme-end */`;
 
-  const tailwindImportRegex = /(@import\s+["']tailwindcss["'];?\s*\n?)/;
+  // Use [ \t]* (not \s*) so we only capture the line, not following blank lines
+  const tailwindImportRegex = /(@import\s+["']tailwindcss["'];?[ \t]*\n?)/;
   if (tailwindImportRegex.test(cssContent)) {
-    // liveImport → top of file (before @import "tailwindcss")
+    // liveImport → before @import "tailwindcss" (CSS spec: @import must precede other rules)
     // themeBlock → right after @import "tailwindcss"
-    cssContent = cssContent.replace(tailwindImportRegex, `${liveImport}\n$1\n${themeBlock}\n`);
+    cssContent = cssContent.replace(tailwindImportRegex, `${liveImport}\n$1\n${themeBlock}\n\n`);
   } else {
-    cssContent = liveImport + "\n" + themeBlock + "\n" + cssContent;
+    cssContent = liveImport + "\n" + themeBlock + "\n\n" + cssContent;
   }
   fs.writeFileSync(cssFile, cssContent);
 
