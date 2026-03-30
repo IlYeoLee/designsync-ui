@@ -8,7 +8,58 @@ import https from "https";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CDN = "https://designsync-omega.vercel.app";
 
-// ── Helpers ─────────────────────────────────────────────────────────
+// ── Peer dependencies required by DesignSync UI components ───────────
+const PEER_DEPS = [
+  // Radix UI primitives
+  "@radix-ui/react-accordion",
+  "@radix-ui/react-alert-dialog",
+  "@radix-ui/react-aspect-ratio",
+  "@radix-ui/react-avatar",
+  "@radix-ui/react-checkbox",
+  "@radix-ui/react-collapsible",
+  "@radix-ui/react-context-menu",
+  "@radix-ui/react-dialog",
+  "@radix-ui/react-dropdown-menu",
+  "@radix-ui/react-hover-card",
+  "@radix-ui/react-label",
+  "@radix-ui/react-menubar",
+  "@radix-ui/react-navigation-menu",
+  "@radix-ui/react-popover",
+  "@radix-ui/react-progress",
+  "@radix-ui/react-radio-group",
+  "@radix-ui/react-scroll-area",
+  "@radix-ui/react-select",
+  "@radix-ui/react-separator",
+  "@radix-ui/react-slider",
+  "@radix-ui/react-slot",
+  "@radix-ui/react-switch",
+  "@radix-ui/react-tabs",
+  "@radix-ui/react-toast",
+  "@radix-ui/react-toggle",
+  "@radix-ui/react-toggle-group",
+  "@radix-ui/react-tooltip",
+  // Utility libraries
+  "class-variance-authority",
+  "clsx",
+  "tailwind-merge",
+  // Icon library (default)
+  "lucide-react",
+  // Component dependencies
+  "sonner",
+  "cmdk",
+  "date-fns",
+  "vaul",
+  "react-hook-form",
+  "@hookform/resolvers",
+  "input-otp",
+  "react-resizable-panels",
+  "embla-carousel-react",
+  "react-day-picker",
+  "recharts",
+  "tw-animate-css",
+];
+
+// ── Helpers ──────────────────────────────────────────────────────────
 
 function findProjectRoot(dir) {
   if (fs.existsSync(path.join(dir, "package.json")) && !dir.includes("node_modules")) {
@@ -17,6 +68,29 @@ function findProjectRoot(dir) {
   const parent = path.dirname(dir);
   if (parent === dir) return null;
   return findProjectRoot(parent);
+}
+
+function detectPackageManager(root) {
+  if (fs.existsSync(path.join(root, "pnpm-lock.yaml"))) return "pnpm";
+  if (fs.existsSync(path.join(root, "yarn.lock"))) return "yarn";
+  return "npm";
+}
+
+function buildInstallCommand(pkgManager, packages) {
+  switch (pkgManager) {
+    case "pnpm": return `pnpm add ${packages.join(" ")}`;
+    case "yarn": return `yarn add ${packages.join(" ")}`;
+    default:     return `npm install ${packages.join(" ")} --save`;
+  }
+}
+
+function getMissingPackages(root, packages) {
+  const nodeModules = path.join(root, "node_modules");
+  return packages.filter((pkg) => {
+    // Scoped packages like @radix-ui/react-slot live at node_modules/@radix-ui/react-slot
+    const pkgDir = path.join(nodeModules, ...pkg.split("/"));
+    return !fs.existsSync(pkgDir);
+  });
 }
 
 function findCssFile(root) {
@@ -34,7 +108,11 @@ function findCssFile(root) {
   }
 
   // 2) From entry files
-  const entries = ["src/main.tsx", "src/main.ts", "src/main.jsx", "src/index.tsx", "src/index.ts", "pages/_app.tsx", "pages/_app.js"];
+  const entries = [
+    "src/main.tsx", "src/main.ts", "src/main.jsx",
+    "src/index.tsx", "src/index.ts",
+    "pages/_app.tsx", "pages/_app.js",
+  ];
   for (const entry of entries) {
     const entryPath = path.join(root, entry);
     if (fs.existsSync(entryPath)) {
@@ -72,7 +150,7 @@ function fetchText(url) {
   });
 }
 
-// ── Main ────────────────────────────────────────────────────────────
+// ── Main ─────────────────────────────────────────────────────────────
 
 const projectRoot = findProjectRoot(path.resolve(__dirname, "../../.."));
 if (!projectRoot) {
@@ -83,10 +161,29 @@ if (!projectRoot) {
 const origCwd = process.cwd();
 process.chdir(projectRoot);
 
+const pkgManager = detectPackageManager(projectRoot);
+
 console.log("");
 console.log("  [designsync-ui] Setting up DesignSync...");
+console.log(`  Package manager detected: ${pkgManager}`);
 
-// ── 1. Copy components ──────────────────────────────────────────────
+// ── 0. Install missing peer dependencies ─────────────────────────────
+try {
+  const missing = getMissingPackages(projectRoot, PEER_DEPS);
+  if (missing.length > 0) {
+    console.log(`  [0/6] Installing ${missing.length} missing peer dependencies...`);
+    const cmd = buildInstallCommand(pkgManager, missing);
+    execSync(cmd, { cwd: projectRoot, stdio: "inherit" });
+    console.log(`  [0/6] Peer dependencies installed`);
+  } else {
+    console.log("  [0/6] All peer dependencies already present");
+  }
+} catch (e) {
+  // Non-fatal: components may still work if most deps are present
+  console.log(`  [0/6] Peer dependency install warning: ${e.message}`);
+}
+
+// ── 1. Copy components ───────────────────────────────────────────────
 const srcComponents = path.join(__dirname, "components", "ui");
 const srcLib = path.join(__dirname, "lib");
 
@@ -117,9 +214,9 @@ if (fs.existsSync(utilsSrc) && !fs.existsSync(utilsDest)) {
   fs.copyFileSync(utilsSrc, utilsDest);
 }
 
-console.log(`  [1/5] Copied ${copied} components`);
+console.log(`  [1/6] Copied ${copied} components`);
 
-// ── 2. Detect slug from .designsync.json or env ─────────────────────
+// ── 2. Detect slug from .designsync.json or env ──────────────────────
 let dsSlug = process.env.DESIGNSYNC_SLUG || "";
 
 const dsConfigPath = path.join(projectRoot, ".designsync.json");
@@ -131,7 +228,7 @@ if (fs.existsSync(dsConfigPath)) {
   } catch {}
 }
 
-// ── 2b. Fetch icon library from API if slug exists ──────────────────
+// ── 2b. Fetch icon library from API if slug exists ───────────────────
 const ICON_MAP = {
   ArrowLeft:          { tabler: "IconArrowLeft",        phosphor: "ArrowLeft",        remix: "RiArrowLeftLine",       hugeicons: "ArrowLeft01Icon" },
   ArrowRight:         { tabler: "IconArrowRight",       phosphor: "ArrowRight",       remix: "RiArrowRightLine",      hugeicons: "ArrowRight01Icon" },
@@ -155,11 +252,11 @@ const ICON_MAP = {
 };
 
 const LIBRARY_PKG = {
-  lucide: "lucide-react",
-  tabler: "@tabler/icons-react",
-  phosphor: "@phosphor-icons/react",
-  remix: "@remixicon/react",
-  hugeicons: "@hugeicons/react",
+  lucide:     "lucide-react",
+  tabler:     "@tabler/icons-react",
+  phosphor:   "@phosphor-icons/react",
+  remix:      "@remixicon/react",
+  hugeicons:  "@hugeicons/react",
 };
 
 let iconLibrary = dsConfig.iconLibrary || "lucide";
@@ -188,8 +285,8 @@ if (iconLibrary !== "lucide") {
         content = content.replace(
           /import\s*\{([^}]+)\}\s*from\s*"lucide-react"/g,
           (_match, importList) => {
-            const icons = importList.split(",").map(s => s.trim()).filter(Boolean);
-            const mapped = icons.map(icon => {
+            const icons = importList.split(",").map((s) => s.trim()).filter(Boolean);
+            const mapped = icons.map((icon) => {
               const entry = ICON_MAP[icon];
               if (!entry || !entry[iconLibrary]) return icon;
               const newName = entry[iconLibrary];
@@ -202,14 +299,17 @@ if (iconLibrary !== "lucide") {
         rewritten++;
       }
     }
-    // Install the icon package
+
+    // Install the non-lucide icon package using the detected package manager
     try {
-      execSync(`npm install ${targetPkg} --save 2>/dev/null || true`, { cwd: projectRoot, stdio: "ignore" });
+      const iconInstallCmd = buildInstallCommand(pkgManager, [targetPkg]);
+      execSync(iconInstallCmd, { cwd: projectRoot, stdio: "ignore" });
     } catch {}
-    console.log(`  [2/5] Icon library: ${iconLibrary} (${rewritten} files rewritten)`);
+
+    console.log(`  [2/6] Icon library: ${iconLibrary} (${rewritten} files rewritten)`);
   }
 } else {
-  console.log(`  [2/5] Icon library: lucide (default)`);
+  console.log(`  [2/6] Icon library: lucide (default)`);
 }
 
 // ── 3. Inject @theme inline + @import url(...) into CSS ──────────────
@@ -278,7 +378,7 @@ if (cssFile && dsSlug) {
   const liveUrl = `${CDN}/r/${dsSlug}/designsync-tokens.css`;
   let cssContent = fs.readFileSync(cssFile, "utf-8");
 
-  // Remove old @import url(...designsync-tokens.css) if present (no longer used)
+  // Remove old @import url(...designsync-tokens.css) if present
   cssContent = cssContent.replace(/^@import\s+url\(["'][^"']*designsync-tokens\.css["']\);?\s*\n?/m, "");
   // Remove old theme block if present
   cssContent = cssContent.replace(/\/\* designsync-theme-start \*\/[\s\S]*?\/\* designsync-theme-end \*\/\s*\n?/m, "");
@@ -294,7 +394,7 @@ if (cssFile && dsSlug) {
   }
   fs.writeFileSync(cssFile, cssContent);
 
-  // Inject <link> tag into index.html for live token sync (works with all build tools)
+  // Inject <link> tag into index.html for live token sync
   const htmlCandidates = ["index.html", "public/index.html", "src/index.html"];
   const linkTag = `<link rel="stylesheet" href="${liveUrl}" />`;
   for (const htmlPath of htmlCandidates) {
@@ -316,14 +416,14 @@ if (cssFile && dsSlug) {
     }
   }
 
-  console.log("  [3/5] Live token sync + theme enabled");
+  console.log("  [3/6] Live token sync + theme enabled");
 } else if (cssFile) {
-  console.log("  [3/5] Skipped live sync (set DESIGNSYNC_SLUG env or create .designsync.json)");
+  console.log("  [3/6] Skipped live sync (set DESIGNSYNC_SLUG env or create .designsync.json)");
 } else {
-  console.log("  [3/5] Skipped live sync (CSS file not found)");
+  console.log("  [3/6] Skipped live sync (CSS file not found)");
 }
 
-// ── 4. Fetch and write AI rules (.cursorrules, CLAUDE.md) ───────────
+// ── 4. Fetch and write AI rules (.cursorrules, CLAUDE.md) ────────────
 try {
   const rulesUrl = dsSlug ? `${CDN}/api/rules?ds=${dsSlug}` : `${CDN}/api/rules`;
   const rulesText = await fetchText(rulesUrl);
@@ -331,12 +431,12 @@ try {
   if (rulesText && rulesText.length > 100) {
     fs.writeFileSync(path.join(projectRoot, ".cursorrules"), rulesText);
     fs.writeFileSync(path.join(projectRoot, "CLAUDE.md"), rulesText);
-    console.log("  [4/5] Created .cursorrules + CLAUDE.md");
+    console.log("  [4/6] Created .cursorrules + CLAUDE.md");
   } else {
-    console.log("  [4/5] Skipped rules (could not fetch)");
+    console.log("  [4/6] Skipped rules (could not fetch)");
   }
 } catch {
-  console.log("  [4/5] Skipped rules (network error)");
+  console.log("  [4/6] Skipped rules (network error)");
 }
 
 // ── 5. Copy ESLint plugin + inject into eslint.config.js ─────────────
@@ -371,40 +471,57 @@ if (fs.existsSync(pluginSrc)) {
       eslintConfig = eslintConfig.slice(0, closingBracket) + configBlock + eslintConfig.slice(closingBracket);
 
       fs.writeFileSync(eslintConfigPath, eslintConfig);
-      console.log("  [4/5] ESLint DesignSync rules injected");
+      console.log("  [5/6] ESLint DesignSync rules injected");
     } else {
-      console.log("  [4/5] ESLint rules already configured");
+      console.log("  [5/6] ESLint rules already configured");
     }
   } else {
-    console.log("  [4/5] Skipped ESLint injection (no eslint.config.js)");
+    console.log("  [5/6] Skipped ESLint injection (no eslint.config.js)");
   }
 } else {
-  console.log("  [4/5] Skipped ESLint plugin (file not found)");
+  console.log("  [5/6] Skipped ESLint plugin (file not found)");
 }
 
 // ── 6. Migrate existing code to DesignSync tokens ────────────────────
 const CLASS_MAP = {
-  'bg-white': 'bg-background', 'bg-gray-50': 'bg-background', 'bg-slate-50': 'bg-background',
-  'bg-[#fafafa]': 'bg-background', 'bg-[#fff]': 'bg-background',
-  'bg-gray-100': 'bg-muted', 'bg-slate-100': 'bg-muted', 'bg-gray-200': 'bg-muted',
-  'bg-blue-600': 'bg-primary', 'bg-indigo-600': 'bg-primary',
-  'bg-red-600': 'bg-destructive', 'bg-red-500': 'bg-destructive',
-  'bg-blue-50': 'bg-accent', 'bg-indigo-50': 'bg-accent',
-  'text-gray-900': 'text-foreground', 'text-gray-800': 'text-foreground', 'text-black': 'text-foreground',
-  'text-gray-600': 'text-muted-foreground', 'text-gray-500': 'text-muted-foreground', 'text-gray-400': 'text-muted-foreground',
-  'text-white': 'text-primary-foreground',
-  'text-blue-600': 'text-primary', 'text-red-600': 'text-destructive',
-  'border-gray-200': 'border-border', 'border-gray-100': 'border-border', 'border-[#e5e5e5]': 'border-border',
-  'border-gray-300': 'border-input', 'border-[#ddd]': 'border-input',
-  'hover:bg-gray-50': 'hover:bg-accent', 'hover:bg-gray-100': 'hover:bg-accent',
+  'bg-white':           'bg-background',
+  'bg-gray-50':         'bg-background',
+  'bg-slate-50':        'bg-background',
+  'bg-[#fafafa]':       'bg-background',
+  'bg-[#fff]':          'bg-background',
+  'bg-gray-100':        'bg-muted',
+  'bg-slate-100':       'bg-muted',
+  'bg-gray-200':        'bg-muted',
+  'bg-blue-600':        'bg-primary',
+  'bg-indigo-600':      'bg-primary',
+  'bg-red-600':         'bg-destructive',
+  'bg-red-500':         'bg-destructive',
+  'bg-blue-50':         'bg-accent',
+  'bg-indigo-50':       'bg-accent',
+  'text-gray-900':      'text-foreground',
+  'text-gray-800':      'text-foreground',
+  'text-black':         'text-foreground',
+  'text-gray-600':      'text-muted-foreground',
+  'text-gray-500':      'text-muted-foreground',
+  'text-gray-400':      'text-muted-foreground',
+  'text-white':         'text-primary-foreground',
+  'text-blue-600':      'text-primary',
+  'text-red-600':       'text-destructive',
+  'border-gray-200':    'border-border',
+  'border-gray-100':    'border-border',
+  'border-[#e5e5e5]':   'border-border',
+  'border-gray-300':    'border-input',
+  'border-[#ddd]':      'border-input',
+  'hover:bg-gray-50':   'hover:bg-accent',
+  'hover:bg-gray-100':  'hover:bg-accent',
 };
 
 function migrateFile(filePath) {
   let content = fs.readFileSync(filePath, "utf-8");
   let changed = false;
   for (const [from, to] of Object.entries(CLASS_MAP)) {
-    const escaped = from.replace(/[[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
-    const re = new RegExp(`(?<=['" ])${escaped}(?=['" ])`, 'g');
+    const escaped = from.replace(/[[\]{}()*+?.,\\^$|#\s]/g, "\\$&");
+    const re = new RegExp(`(?<=['" ])${escaped}(?=['" ])`, "g");
     const next = content.replace(re, to);
     if (next !== content) { content = next; changed = true; }
   }
@@ -413,13 +530,15 @@ function migrateFile(filePath) {
 }
 
 try {
-  const srcDir = fs.existsSync(path.join(projectRoot, "src")) ? path.join(projectRoot, "src") : projectRoot;
-  const exts = ['.tsx', '.ts', '.jsx', '.js'];
+  const srcDir = fs.existsSync(path.join(projectRoot, "src"))
+    ? path.join(projectRoot, "src")
+    : projectRoot;
+  const exts = [".tsx", ".ts", ".jsx", ".js"];
   let migratedCount = 0;
 
   function walkAndMigrate(dir) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name === 'node_modules' || entry.name === '.next' || entry.name === 'dist') continue;
+      if (entry.name === "node_modules" || entry.name === ".next" || entry.name === "dist") continue;
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) { walkAndMigrate(full); }
       else if (exts.includes(path.extname(entry.name))) {
@@ -429,12 +548,12 @@ try {
   }
 
   walkAndMigrate(srcDir);
-  console.log(`  [5/5] Migrated ${migratedCount} files to DesignSync tokens`);
+  console.log(`  [6/6] Migrated ${migratedCount} files to DesignSync tokens`);
 } catch (e) {
-  console.log(`  [5/5] Migration skipped: ${e.message}`);
+  console.log(`  [6/6] Migration skipped: ${e.message}`);
 }
 
-// ── 7. Create .designsync.json if slug provided ─────────────────────
+// ── Write .designsync.json if slug provided ──────────────────────────
 if (dsSlug && !fs.existsSync(dsConfigPath)) {
   fs.writeFileSync(dsConfigPath, JSON.stringify({
     slug: dsSlug,
@@ -443,7 +562,7 @@ if (dsSlug && !fs.existsSync(dsConfigPath)) {
   }, null, 2) + "\n");
 }
 
-// ── 6. Version check ──────────────────────────────────────────────
+// ── Version check ─────────────────────────────────────────────────────
 const installedPkg = JSON.parse(fs.readFileSync(path.join(__dirname, "package.json"), "utf-8"));
 const installedVersion = installedPkg.version;
 
@@ -452,17 +571,18 @@ try {
   const latestVersion = JSON.parse(latestJson).version;
   if (latestVersion && latestVersion !== installedVersion) {
     console.log("");
-    console.log(`  ⚡ Update available: ${installedVersion} → ${latestVersion}`);
-    console.log(`     npm install github:IlYeoLee/designsync-ui`);
+    console.log(`  Update available: ${installedVersion} -> ${latestVersion}`);
+    console.log(`  ${pkgManager === "pnpm" ? "pnpm add" : pkgManager === "yarn" ? "yarn add" : "npm install"} github:IlYeoLee/designsync-ui`);
     console.log("");
   }
 } catch {}
 
-console.log("  [5/5] Done!");
+console.log("  [6/6] Done!");
 console.log("");
+
 if (!dsSlug) {
   console.log("  Tip: To enable live token sync, run:");
-  console.log(`  DESIGNSYNC_SLUG=your-slug npm install github:IlYeoLee/designsync-ui`);
+  console.log(`  DESIGNSYNC_SLUG=your-slug ${pkgManager} install github:IlYeoLee/designsync-ui`);
   console.log("  Get your slug from https://designsync-omega.vercel.app");
   console.log("");
 }
