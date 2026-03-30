@@ -103,7 +103,11 @@ fs.mkdirSync(libDest, { recursive: true });
 
 let copied = 0;
 for (const file of fs.readdirSync(srcComponents)) {
-  fs.copyFileSync(path.join(srcComponents, file), path.join(compDest, file));
+  const destPath = path.join(compDest, file);
+  let content = fs.readFileSync(path.join(srcComponents, file), "utf-8");
+  // Fix registry-internal imports → standard @/components/ui/ path
+  content = content.replace(/@\/registry\/new-york\/ui\//g, "@/components/ui/");
+  fs.writeFileSync(destPath, content);
   copied++;
 }
 
@@ -378,7 +382,59 @@ if (fs.existsSync(pluginSrc)) {
   console.log("  [4/5] Skipped ESLint plugin (file not found)");
 }
 
-// ── 6. Create .designsync.json if slug provided ─────────────────────
+// ── 6. Migrate existing code to DesignSync tokens ────────────────────
+const CLASS_MAP = {
+  'bg-white': 'bg-background', 'bg-gray-50': 'bg-background', 'bg-slate-50': 'bg-background',
+  'bg-[#fafafa]': 'bg-background', 'bg-[#fff]': 'bg-background',
+  'bg-gray-100': 'bg-muted', 'bg-slate-100': 'bg-muted', 'bg-gray-200': 'bg-muted',
+  'bg-blue-600': 'bg-primary', 'bg-indigo-600': 'bg-primary',
+  'bg-red-600': 'bg-destructive', 'bg-red-500': 'bg-destructive',
+  'bg-blue-50': 'bg-accent', 'bg-indigo-50': 'bg-accent',
+  'text-gray-900': 'text-foreground', 'text-gray-800': 'text-foreground', 'text-black': 'text-foreground',
+  'text-gray-600': 'text-muted-foreground', 'text-gray-500': 'text-muted-foreground', 'text-gray-400': 'text-muted-foreground',
+  'text-white': 'text-primary-foreground',
+  'text-blue-600': 'text-primary', 'text-red-600': 'text-destructive',
+  'border-gray-200': 'border-border', 'border-gray-100': 'border-border', 'border-[#e5e5e5]': 'border-border',
+  'border-gray-300': 'border-input', 'border-[#ddd]': 'border-input',
+  'hover:bg-gray-50': 'hover:bg-accent', 'hover:bg-gray-100': 'hover:bg-accent',
+};
+
+function migrateFile(filePath) {
+  let content = fs.readFileSync(filePath, "utf-8");
+  let changed = false;
+  for (const [from, to] of Object.entries(CLASS_MAP)) {
+    const escaped = from.replace(/[[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+    const re = new RegExp(`(?<=['" ])${escaped}(?=['" ])`, 'g');
+    const next = content.replace(re, to);
+    if (next !== content) { content = next; changed = true; }
+  }
+  if (changed) fs.writeFileSync(filePath, content);
+  return changed;
+}
+
+try {
+  const srcDir = fs.existsSync(path.join(projectRoot, "src")) ? path.join(projectRoot, "src") : projectRoot;
+  const exts = ['.tsx', '.ts', '.jsx', '.js'];
+  let migratedCount = 0;
+
+  function walkAndMigrate(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === 'node_modules' || entry.name === '.next' || entry.name === 'dist') continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) { walkAndMigrate(full); }
+      else if (exts.includes(path.extname(entry.name))) {
+        if (migrateFile(full)) migratedCount++;
+      }
+    }
+  }
+
+  walkAndMigrate(srcDir);
+  console.log(`  [5/5] Migrated ${migratedCount} files to DesignSync tokens`);
+} catch (e) {
+  console.log(`  [5/5] Migration skipped: ${e.message}`);
+}
+
+// ── 7. Create .designsync.json if slug provided ─────────────────────
 if (dsSlug && !fs.existsSync(dsConfigPath)) {
   fs.writeFileSync(dsConfigPath, JSON.stringify({
     slug: dsSlug,
