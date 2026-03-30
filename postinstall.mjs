@@ -162,6 +162,67 @@ function fetchBinary(url) {
   });
 }
 
+// Search system font directories for a font by name, copy to public/fonts/
+// Returns @font-face CSS string or "" if not found
+function extractSystemFont(fontFamily, projectRoot) {
+  const name = fontFamily.trim().replace(/^['"]|['"]$/g, "");
+  if (!name) return "";
+
+  const homeDir = process.env.HOME || process.env.USERPROFILE || "";
+  const fontDirs = process.platform === "win32"
+    ? [
+        path.join(process.env.WINDIR || "C:\\Windows", "Fonts"),
+        path.join(homeDir, "AppData", "Local", "Microsoft", "Windows", "Fonts"),
+      ]
+    : [
+        "/System/Library/Fonts",
+        "/Library/Fonts",
+        path.join(homeDir, "Library", "Fonts"),
+        "/usr/share/fonts",
+        path.join(homeDir, ".fonts"),
+        path.join(homeDir, ".local", "share", "fonts"),
+      ];
+
+  const exts = [".woff2", ".woff", ".otf", ".ttf"];
+  // Normalize name for fuzzy match: lowercase, strip spaces/hyphens
+  const normalize = (s) => s.toLowerCase().replace(/[\s\-_]/g, "");
+  const normalizedName = normalize(name);
+
+  const publicFontsDir = path.join(projectRoot, "public", "fonts");
+  fs.mkdirSync(publicFontsDir, { recursive: true });
+
+  const found = [];
+  for (const dir of fontDirs) {
+    if (!fs.existsSync(dir)) continue;
+    let entries = [];
+    try { entries = fs.readdirSync(dir); } catch { continue; }
+    for (const entry of entries) {
+      const ext = path.extname(entry).toLowerCase();
+      if (!exts.includes(ext)) continue;
+      if (!normalize(entry).includes(normalizedName)) continue;
+      const src = path.join(dir, entry);
+      const dest = path.join(publicFontsDir, entry);
+      if (!fs.existsSync(dest)) {
+        try { fs.copyFileSync(src, dest); } catch { continue; }
+      }
+      const format = ext === ".woff2" ? "woff2" : ext === ".woff" ? "woff" : ext === ".ttf" ? "truetype" : "opentype";
+      // Infer weight from filename
+      const lc = entry.toLowerCase();
+      const weight = lc.includes("thin") ? "100" : lc.includes("extralight") || lc.includes("extra-light") ? "200"
+        : lc.includes("light") ? "300" : lc.includes("semibold") || lc.includes("semi-bold") ? "600"
+        : lc.includes("extrabold") || lc.includes("extra-bold") ? "800" : lc.includes("bold") ? "700"
+        : lc.includes("black") || lc.includes("heavy") ? "900" : "400";
+      found.push({ entry, format, weight });
+    }
+  }
+
+  if (found.length === 0) return "";
+
+  return found.map(({ entry, format, weight }) =>
+    `@font-face {\n  font-family: '${name}';\n  src: url('/fonts/${entry}') format('${format}');\n  font-weight: ${weight};\n  font-display: swap;\n}`
+  ).join("\n") + "\n";
+}
+
 // Download all @font-face src URLs to public/fonts/, rewrite CSS to use local paths
 async function localizefonts(css, projectRoot) {
   const publicFontsDir = path.join(projectRoot, "public", "fonts");
@@ -734,6 +795,25 @@ if (cssFile && dsSlug) {
     // Download custom fonts locally → rewrite to /fonts/filename
     const { css: localizedCss, fontsDownloaded } = await localizefonts(tokenCss, projectRoot);
     tokenCss = localizedCss;
+
+    // Extract system fonts for any local (no-URL) font families in the token CSS
+    // Looks for --font-sans / --font-sans-ko values that aren't already covered by @font-face
+    const fontFamilyMatches = [...tokenCss.matchAll(/--font-sans(?:-ko)?:\s*([^;]+);/g)];
+    let systemFontCss = "";
+    const alreadyCovered = new Set([...tokenCss.matchAll(/font-family:\s*['"]?([^'";,\n]+)/g)].map(m => m[1].trim().toLowerCase()));
+    for (const match of fontFamilyMatches) {
+      // Extract first font name from value like '"KMR Apparat", sans-serif'
+      const firstFont = match[1].trim().split(",")[0].replace(/['"]/g, "").trim();
+      if (!firstFont || firstFont.toLowerCase().includes("var(") || alreadyCovered.has(firstFont.toLowerCase())) continue;
+      const extracted = extractSystemFont(firstFont, projectRoot);
+      if (extracted) {
+        systemFontCss += extracted + "\n";
+        console.log(`  [3/6] 시스템 폰트 발견: ${firstFont} → public/fonts/`);
+      }
+    }
+    if (systemFontCss) {
+      tokenCss = systemFontCss + tokenCss;
+    }
 
     // Separate @import lines (Google Fonts CDN etc.) from token body
     const importLines = [];
