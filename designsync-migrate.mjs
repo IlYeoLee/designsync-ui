@@ -31,6 +31,13 @@ CRITICAL RULES:
 - Fix ONLY UI/styling. Do NOT change any logic, state, props, event handlers, or data.
 - Return ONLY the complete migrated file content. No explanation. No markdown fences.
 - ALWAYS specify Button variant — NEVER leave it unset (default=primary pill, usually wrong):
+
+3-TIER MIGRATION STRATEGY:
+TIER 1 (full replacement): pattern exactly matches DS component → replace entirely
+TIER 2 (partial): similar but custom details → use DS component as wrapper + className overrides
+TIER 3 (token-only): no DS component matches → keep original HTML, ONLY replace hardcoded values with tokens
+  bg-blue-600→bg-primary, text-gray-500→text-muted-foreground, rounded-lg→rounded-[var(--ds-card-radius)], etc.
+RULE: NEVER force a wrong DS component. Token-only (Tier 3) is always better than wrong component.
   - Main CTA / form submit → variant="default"
   - Secondary / bordered   → variant="outline"
   - Nav / sidebar / icon   → variant="ghost" (or size="icon")
