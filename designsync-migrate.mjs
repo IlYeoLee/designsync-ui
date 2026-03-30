@@ -238,13 +238,115 @@ async function migrateViaOpenAI(content, filename, screenshotB64) {
   return data.choices[0].message.content;
 }
 
+let PROJECT_CONTEXT = ""; // set after pre-analysis
+
 async function migrate(content, filename, screenshotB64) {
+  const contextualContent = PROJECT_CONTEXT
+    ? `━━━ PROJECT CONTEXT ━━━\n${PROJECT_CONTEXT}${buildFewShotContext()}\n━━━ END CONTEXT ━━━\n\n${content}`
+    : content + buildFewShotContext();
+
   const raw = ANTHROPIC_KEY
-    ? await migrateViaAnthropic(content, filename, screenshotB64)
+    ? await migrateViaAnthropic(contextualContent, filename, screenshotB64)
     : OPENAI_KEY
-    ? await migrateViaOpenAI(content, filename, screenshotB64)
-    : await migrateViaServer(content, filename, screenshotB64);
+    ? await migrateViaOpenAI(contextualContent, filename, screenshotB64)
+    : await migrateViaServer(contextualContent, filename, screenshotB64);
   return raw.replace(/^```(?:tsx?|jsx?)?\n?/, "").replace(/\n?```\s*$/, "");
+}
+
+// ── Pre-analysis pass ────────────────────────────────────────────────
+
+async function analyzeProject(allFiles) {
+  // Sample up to 40 files (spread across dirs) for analysis
+  const sample = allFiles.length <= 40 ? allFiles : [
+    ...allFiles.filter(f => f.includes("layout") || f.includes("sidebar") || f.includes("nav") || f.includes("header")),
+    ...allFiles.filter(f => !f.includes("layout") && !f.includes("sidebar") && !f.includes("nav") && !f.includes("header")).slice(0, 30),
+  ].slice(0, 40);
+
+  const combined = sample.map(f => {
+    try { return `=== ${basename(f)} ===\n${readFileSync(f, "utf-8").slice(0, 1500)}`; }
+    catch { return ""; }
+  }).filter(Boolean).join("\n\n");
+
+  const prompt = `Analyze this React/Next.js codebase and produce a concise PROJECT CONTEXT document.
+
+For each UI pattern found, note:
+1. What custom pattern is used (e.g. "custom modal: fixed inset-0 + bg-black/50")
+2. Which files use it
+3. Which DesignSync component it should map to
+4. Any special considerations (shared state, multi-file, complex nesting)
+
+Also note:
+- The icon library used (lucide-react, phosphor, etc.)
+- Whether it uses react-hook-form, zod
+- Common className patterns repeated everywhere
+- Files that are tightly coupled (import each other)
+
+Output format: concise bullet points, max 60 lines. This will be injected into every migration prompt.
+
+Codebase sample:
+${combined}`;
+
+  try {
+    let analysisRaw = "";
+    if (ANTHROPIC_KEY) {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 2000,
+          messages: [{ role: "user", content: prompt }],
+        }),
+      });
+      const data = await res.json();
+      analysisRaw = data.content?.[0]?.text || "";
+    } else if (OPENAI_KEY) {
+      const res = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${OPENAI_KEY}`, "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-4o", max_tokens: 2000, messages: [{ role: "user", content: prompt }] }),
+      });
+      const data = await res.json();
+      analysisRaw = data.choices?.[0]?.message?.content || "";
+    } else {
+      // Use DesignSync server for analysis too
+      const res = await fetch(DESIGNSYNC_SERVER, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content: combined, filename: "__analysis__" }),
+      });
+      const data = await res.json().catch(() => ({}));
+      analysisRaw = data.migrated || "";
+    }
+    return analysisRaw.trim();
+  } catch { return ""; }
+}
+
+// Few-shot context: collect successfully migrated examples
+const migratedExamples = []; // { filename, before, after }
+
+function addExample(filename, before, after) {
+  if (migratedExamples.length >= 3) return; // keep top 3 only
+  migratedExamples.push({ filename, before: before.slice(0, 800), after: after.slice(0, 800) });
+}
+
+function buildFewShotContext() {
+  if (migratedExamples.length === 0) return "";
+  return `\n\n━━━ EXAMPLES FROM THIS PROJECT (already migrated) ━━━\n` +
+    migratedExamples.map(e =>
+      `--- ${e.filename} BEFORE ---\n${e.before}\n--- ${e.filename} AFTER ---\n${e.after}`
+    ).join("\n\n");
+}
+
+// TypeScript error feedback
+function getTsErrors(filePath) {
+  try {
+    execSync(`npx tsc --noEmit --skipLibCheck 2>&1 | grep "${basename(filePath)}"`, { stdio: ["pipe", "pipe", "pipe"] });
+    return [];
+  } catch (e) {
+    const out = e.stdout?.toString() || e.stderr?.toString() || "";
+    return out.split("\n").filter(l => l.includes(basename(filePath))).slice(0, 5);
+  }
 }
 
 // ── Group migration (multi-file) ─────────────────────────────────────
@@ -406,6 +508,15 @@ const visualTag = VISUAL_MODE ? " + Vision" : "";
 console.log(`\n🚀  DesignSync AI Migration (${mode}${visualTag})`);
 console.log(`📁  ${srcDir}/ — ${allFiles.length}개 파일\n`);
 
+// ── Pre-analysis pass ────────────────────────────────────────────────
+process.stdout.write(`\n🔍  프로젝트 패턴 분석 중...`);
+PROJECT_CONTEXT = await analyzeProject(allFiles);
+if (PROJECT_CONTEXT) {
+  process.stdout.write(` 완료 (${PROJECT_CONTEXT.split("\n").length}줄 컨텍스트)\n`);
+} else {
+  process.stdout.write(` 스킵\n`);
+}
+
 // Find dev server for visual mode
 let devBaseUrl = null;
 if (VISUAL_MODE) {
@@ -442,24 +553,38 @@ console.log(`\n⚡  ${toMigrate.length}개 파일 마이그레이션 (${groupCou
 let done = 0, failed = 0;
 
 async function processSingleFile(filePath, screenshotB64) {
-  let content = readFileSync(filePath, "utf-8");
-  let migrated = await migrate(content, basename(filePath), screenshotB64);
+  const originalContent = readFileSync(filePath, "utf-8");
+  let migrated = await migrate(originalContent, basename(filePath), screenshotB64);
   writeFileSync(filePath, migrated);
 
   let attempts = 1;
   while (attempts < 3) {
+    // ESLint violations
     const violations = getViolations(filePath);
     if (violations.length === 0) break;
     try { execSync(`npx eslint "${filePath}" --fix --quiet`, { stdio: "pipe" }); } catch {}
     const remaining = getViolations(filePath);
     if (remaining.length === 0) break;
-    const violationSummary = remaining.slice(0, 10).map(v => `Line ${v.line}: ${v.message}`).join("\n");
+
+    // TypeScript errors too
+    const tsErrors = getTsErrors(filePath);
+    const violationSummary = [
+      ...remaining.slice(0, 8).map(v => `ESLint Line ${v.line}: ${v.message}`),
+      ...tsErrors.slice(0, 4),
+    ].join("\n");
+
     const retryContent = readFileSync(filePath, "utf-8");
     const raw = await migrate(retryContent, `${basename(filePath)} [retry ${attempts}, fix:\n${violationSummary}]`, screenshotB64);
     writeFileSync(filePath, raw.replace(/^```(?:tsx?|jsx?)?\n?/, "").replace(/\n?```\s*$/, ""));
     attempts++;
   }
   try { execSync(`npx eslint "${filePath}" --fix --quiet`, { stdio: "pipe" }); } catch {}
+
+  // Add to few-shot examples if clean
+  const finalViolations = getViolations(filePath);
+  if (finalViolations.length === 0) {
+    addExample(basename(filePath), originalContent, readFileSync(filePath, "utf-8"));
+  }
 }
 
 for (const group of groups) {
