@@ -761,6 +761,15 @@ if (cssFile && dsSlug) {
       cssContent = themeBlock + "\n\n" + cssContent;
     }
 
+    // Inject font-family into body if missing
+    if (!cssContent.includes("font-family") || !/body\s*\{[^}]*font-family/.test(cssContent)) {
+      if (/body\s*\{/.test(cssContent)) {
+        cssContent = cssContent.replace(/(body\s*\{)/, `$1\n  font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif);`);
+      } else if (/@layer base\s*\{/.test(cssContent)) {
+        cssContent = cssContent.replace(/(@layer base\s*\{)/, `$1\n  body {\n    font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif);\n  }\n`);
+      }
+    }
+
     fs.writeFileSync(cssFile, cssContent);
     console.log(`  [3/6] Tokens inlined (${fontsDownloaded} fonts downloaded to public/fonts/)`);
   } catch (e) {
@@ -991,12 +1000,39 @@ function isAlreadyImported(content, name, importPath) {
  * Skips replacements inside JS comments (// and block comments).
  * Returns { content, changed }.
  */
+// Detect Button variant from className string
+function detectButtonVariant(attrsStr) {
+  const cls = attrsStr.toLowerCase();
+  // Extract className content (string literal or cn() first arg)
+  const classMatch = cls.match(/classname\s*=\s*["'`]([^"'`]*)["'`]/) ||
+                     cls.match(/classname\s*=\s*\{[^}]*["'`]([^"'`]{10,})["'`]/);
+  const classes = classMatch ? classMatch[1] : cls;
+
+  // Already has variant/size — don't touch
+  if (/\bvariant\s*=/.test(attrsStr)) return null;
+
+  // Icon-only: small square button (p-0~2 or size-* with no px-3+)
+  const isIconOnly = /\bp-[0-2]\b|\bp-\[/.test(classes) && !/\bpx-[3-9]\b/.test(classes);
+
+  // Colored CTA button
+  if (/\bbg-(primary|blue|indigo|violet|emerald|green|teal|red|orange)\b/.test(classes)) {
+    return isIconOnly ? 'variant="default" size="icon"' : 'variant="default"';
+  }
+  // Outline: has border but no filled bg
+  if (/\bborder\b/.test(classes) && !/\bbg-(primary|blue|indigo|violet|emerald|green)\b/.test(classes)) {
+    return isIconOnly ? 'variant="outline" size="icon"' : 'variant="outline"';
+  }
+  // Ghost: transparent, muted text, hover-only bg
+  if (/\btext-muted\b|\bbg-transparent\b|\bhover:bg-\w|\btext-(gray|slate|zinc|neutral)-[3-6]/.test(classes)) {
+    return isIconOnly ? 'variant="ghost" size="icon"' : 'variant="ghost"';
+  }
+  // Default safe fallback: ghost (avoids unintended primary pill)
+  return isIconOnly ? 'variant="ghost" size="icon"' : 'variant="ghost"';
+}
+
 function replaceElementTags(content, tag, component) {
   // Opening tag: <button  →  <Button  (only JSX, i.e. followed by space, / or >)
   // Closing tag: </button>  →  </Button>
-  // We use a naive but effective approach: replace outside of comment blocks.
-  // Strip comments temporarily is error-prone; instead use word-boundary regex
-  // and only match when preceded by < or </ and followed by \s, > or />.
 
   const openRe  = new RegExp(`<${tag}(\\s|>|/)`, "g");
   const closeRe = new RegExp(`<\\/${tag}>`, "g");
@@ -1005,6 +1041,17 @@ function replaceElementTags(content, tag, component) {
 
   const next1 = content.replace(openRe, (m, after) => {
     changed = true;
+    // For <button>, detect variant from the full opening tag context
+    if (tag === "button" && after === " ") {
+      // Grab the rest of the opening tag to analyze attrs
+      const tagStart = content.indexOf(m) + m.length;
+      const tagEnd = content.indexOf(">", tagStart);
+      const attrsStr = tagEnd > 0 ? content.slice(tagStart - 1, tagEnd) : "";
+      const variantProp = detectButtonVariant(attrsStr);
+      if (variantProp) {
+        return `<${component} ${variantProp}${after}`;
+      }
+    }
     return `<${component}${after}`;
   });
 
