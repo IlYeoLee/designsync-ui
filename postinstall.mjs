@@ -962,7 +962,6 @@ try {
           }
           if (migrateElements(filePath)) {
             elementMigrated++;
-            anyChanged = true;
           }
         }
       }
