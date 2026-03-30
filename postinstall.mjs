@@ -779,101 +779,58 @@ const themeInlineBlock = `
 }
 `;
 
+// Shadcn token keys that DS overrides via --ds-* prefix
+const SHADCN_KEYS = [
+  "primary", "primary-foreground",
+  "secondary", "secondary-foreground",
+  "background", "foreground",
+  "card", "card-foreground",
+  "muted", "muted-foreground",
+  "accent", "accent-foreground",
+  "destructive", "destructive-foreground",
+  "border", "input", "ring",
+  "popover", "popover-foreground",
+  "radius", "font-sans", "font-mono",
+  "sidebar", "sidebar-foreground",
+  "sidebar-primary", "sidebar-primary-foreground",
+  "sidebar-accent", "sidebar-accent-foreground",
+  "sidebar-border", "sidebar-ring",
+  "chart-1", "chart-2", "chart-3", "chart-4", "chart-5",
+];
+
 const cssFile = findCssFile(projectRoot);
 if (cssFile && dsSlug) {
   const tokenUrl = `${CDN}/r/${dsSlug}/designsync-tokens.css`;
   let cssContent = fs.readFileSync(cssFile, "utf-8");
 
-  // Remove previous designsync injections (anywhere in file)
+  // Remove previous designsync injections
   cssContent = cssContent.replace(/@import\s+url\(["'][^"']*designsync[^"']*["']\)[^;\n]*;?[ \t]*\n?/gm, "");
   cssContent = cssContent.replace(/\/\* designsync-theme-start \*\/[\s\S]*?\/\* designsync-theme-end \*\/[ \t]*\n([ \t]*\n)*/m, "");
+  cssContent = cssContent.replace(/\/\* DesignSync → shadcn mapping \*\/[\s\S]*?(?=\n\/\*|\n@|\n\.[a-z]|$)/m, "");
 
-  // Remove shadcn default :root block that overrides DS tokens
-  // Detects :root { --background: ...; --foreground: ...; } pattern (shadcn boilerplate)
-  cssContent = cssContent.replace(/:root\s*\{[^}]*--background:[^}]*--foreground:[^}]*\}/g, "");
-  // Also remove .dark { --background: ... } shadcn default
-  cssContent = cssContent.replace(/\.dark\s*\{[^}]*--background:[^}]*--foreground:[^}]*\}/g, "");
-
-  try {
-    // Fetch token CSS at install time
-    let tokenCss = await fetchText(tokenUrl);
-
-    // Download custom fonts locally → rewrite to /fonts/filename
-    const { css: localizedCss, fontsDownloaded } = await localizefonts(tokenCss, projectRoot);
-    tokenCss = localizedCss;
-
-    // Extract system fonts for any local (no-URL) font families in the token CSS
-    // Looks for --font-sans / --font-sans-ko values that aren't already covered by @font-face
-    const fontFamilyMatches = [...tokenCss.matchAll(/--font-sans(?:-ko)?:\s*([^;]+);/g)];
-    let systemFontCss = "";
-    const alreadyCovered = new Set([...tokenCss.matchAll(/font-family:\s*['"]?([^'";,\n]+)/g)].map(m => m[1].trim().toLowerCase()));
-    for (const match of fontFamilyMatches) {
-      // Extract first font name from value like '"KMR Apparat", sans-serif'
-      const firstFont = match[1].trim().split(",")[0].replace(/['"]/g, "").trim();
-      if (!firstFont || firstFont.toLowerCase().includes("var(") || alreadyCovered.has(firstFont.toLowerCase())) continue;
-      const extracted = extractSystemFont(firstFont, projectRoot);
-      if (extracted) {
-        systemFontCss += extracted + "\n";
-        console.log(`  [3/6] 시스템 폰트 발견: ${firstFont} → public/fonts/`);
-      }
-    }
-    if (systemFontCss) {
-      tokenCss = systemFontCss + tokenCss;
-    }
-
-    // Separate @import lines (Google Fonts CDN etc.) from token body
-    const importLines = [];
-    const tokenBody = tokenCss.replace(/^@import\s+url\([^)]+\);?[ \t]*\n?/gm, (m) => {
-      importLines.push(m.trim());
-      return "";
-    }).trim();
-
-    // ── HYBRID: @import lines ALWAYS go to absolute top of file ──
-    // ── Fallback token body goes after tailwind import ────────────
-    // CSS spec: @import must appear before any other rules.
-    // Strategy: prepend all @imports to top, inject fallback body separately.
-    const liveImport = `@import url("${tokenUrl}"); /* DesignSync live sync */`;
-
-    // Fallback block has NO @import lines — safe to insert anywhere
-    const fallbackBlock = [
-      "/* designsync-theme-start */",
-      "/* designsync-fallback-start */",
-      tokenBody,            // ① inlined fallback tokens
-      "/* designsync-fallback-end */",
-      themeInlineBlock,     // ② @theme inline for Tailwind
-      "/* designsync-theme-end */",
-    ].join("\n");
-
-    const tailwindV4Regex = /(@import\s+["']tailwindcss["'];?[ \t]*\n?)/;
-    const tailwindV3Regex = /(@tailwind\s+base;?[ \t]*\n?)/;
-
-    // Inject fallback block after tailwind (no @import inside, so position doesn't matter)
-    if (tailwindV4Regex.test(cssContent)) {
-      cssContent = cssContent.replace(tailwindV4Regex, `$1\n${fallbackBlock}\n\n`);
-    } else if (tailwindV3Regex.test(cssContent)) {
-      cssContent = cssContent.replace(tailwindV3Regex, `${fallbackBlock}\n\n$1`);
-    } else {
-      cssContent = fallbackBlock + "\n\n" + cssContent;
-    }
-
-    // ALWAYS prepend @import lines at the absolute top (CSS spec requirement)
-    const topImports = [liveImport, ...importLines].join("\n");
-    cssContent = topImports + "\n\n" + cssContent;
-
-    // Inject font-family into body if missing
-    if (!cssContent.includes("font-family") || !/body\s*\{[^}]*font-family/.test(cssContent)) {
-      if (/body\s*\{/.test(cssContent)) {
-        cssContent = cssContent.replace(/(body\s*\{)/, `$1\n  font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif);`);
-      } else if (/@layer base\s*\{/.test(cssContent)) {
-        cssContent = cssContent.replace(/(@layer base\s*\{)/, `$1\n  body {\n    font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif);\n  }\n`);
-      }
-    }
-
-    fs.writeFileSync(cssFile, cssContent);
-    console.log(`  [3/6] Hybrid sync: live @import + inlined fallback (${fontsDownloaded} fonts locally)`);
-  } catch (e) {
-    console.log(`  [3/6] Token fetch failed (${e.message}) — skipping`);
+  // Inject @theme inline after tailwind import (if not already present)
+  const tailwindV4Regex = /(@import\s+["']tailwindcss["'];?[ \t]*\n?)/;
+  if (!cssContent.includes("@theme inline") && tailwindV4Regex.test(cssContent)) {
+    cssContent = cssContent.replace(tailwindV4Regex, `$1\n${themeInlineBlock}\n`);
   }
+
+  // Prepend live @import at absolute top (CSS spec: @import must come first)
+  const liveImport = `@import url("${tokenUrl}"); /* DesignSync live sync */`;
+  cssContent = liveImport + "\n\n" + cssContent;
+
+  // Append shadcn mapping block at BOTTOM — wins over any :root declared above
+  const indent = "  ";
+  const mappingLines = SHADCN_KEYS.map(k => `${indent}--${k}: var(--ds-${k});`).join("\n");
+  const mappingBlock = [
+    "/* DesignSync → shadcn mapping */",
+    `:root {\n${mappingLines}\n}`,
+    `.dark {\n${mappingLines}\n}`,
+  ].join("\n");
+
+  cssContent = cssContent.trimEnd() + "\n\n" + mappingBlock + "\n";
+
+  fs.writeFileSync(cssFile, cssContent);
+  console.log(`  [3/6] Live sync: @import at top + shadcn mapping at bottom`);
 } else if (cssFile) {
   console.log("  [3/6] Skipped (set DESIGNSYNC_SLUG env or create .designsync.json)");
 } else {
