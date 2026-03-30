@@ -824,10 +824,6 @@ if (cssFile && dsSlug) {
     cssContent = cssContent.replace(tailwindV4Regex, `$1\n${themeInlineBlock}\n`);
   }
 
-  // Prepend live @import at absolute top (CSS spec: @import must come first)
-  const liveImport = `@import url("${tokenUrl}"); /* DesignSync live sync */`;
-  cssContent = liveImport + "\n\n" + cssContent;
-
   // Append shadcn mapping block at BOTTOM — wins over any :root declared above
   const indent = "  ";
   const mappingLines = SHADCN_KEYS.map(k => `${indent}--${k}: var(--ds-${k});`).join("\n");
@@ -840,7 +836,36 @@ if (cssFile && dsSlug) {
   cssContent = cssContent.trimEnd() + "\n\n" + mappingBlock + "\n";
 
   fs.writeFileSync(cssFile, cssContent);
-  console.log(`  [3/6] Live sync: @import at top + shadcn mapping at bottom`);
+
+  // Inject <link rel="stylesheet"> into layout.tsx <head> for reliable token loading
+  // CSS @import inside Next.js-injected <style> tags is not always processed by browsers
+  const layoutCandidates = [
+    path.join(projectRoot, "src/app/layout.tsx"),
+    path.join(projectRoot, "app/layout.tsx"),
+    path.join(projectRoot, "src/app/layout.jsx"),
+    path.join(projectRoot, "app/layout.jsx"),
+  ];
+  const layoutFile = layoutCandidates.find(f => fs.existsSync(f));
+  if (layoutFile) {
+    let layoutContent = fs.readFileSync(layoutFile, "utf-8");
+    const linkTag = `<link rel="stylesheet" href="${tokenUrl}" />`;
+    if (!layoutContent.includes(tokenUrl)) {
+      // Remove old DS link tags
+      layoutContent = layoutContent.replace(/<link\s+rel="stylesheet"\s+href="[^"]*designsync[^"]*"\s*\/>\s*\n?/g, "");
+      // Inject after first <head> or before </head>
+      if (/<head[^>]*>/.test(layoutContent)) {
+        layoutContent = layoutContent.replace(/(<head[^>]*>)/, `$1\n        ${linkTag}`);
+      } else {
+        layoutContent = layoutContent.replace(/(<\/head>)/, `        ${linkTag}\n      $1`);
+      }
+      fs.writeFileSync(layoutFile, layoutContent);
+      console.log(`  [3/6] Live sync: <link> in layout.tsx + shadcn mapping in globals.css`);
+    } else {
+      console.log(`  [3/6] Live sync: already up to date`);
+    }
+  } else {
+    console.log(`  [3/6] Live sync: shadcn mapping injected (layout.tsx not found for <link> tag)`);
+  }
 } else if (cssFile) {
   console.log("  [3/6] Skipped (set DESIGNSYNC_SLUG env or create .designsync.json)");
 } else {
