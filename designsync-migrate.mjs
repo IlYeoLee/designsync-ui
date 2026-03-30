@@ -417,7 +417,143 @@ function buildFileGroups(allFiles) {
   return groups;
 }
 
-// Migrate a group of related files together
+// ── 2. Component-level chunking ───────────────────────────────────────
+// Split a file into top-level exported components/functions
+function splitIntoComponents(content) {
+  const chunks = [];
+  // Match export function/const/default at top level
+  const exportRe = /^(export\s+(?:default\s+)?(?:function|const|class|async function)\s+\w[^]*?)(?=\nexport\s+(?:default\s+)?(?:function|const|class|async function)\s+\w|\n*$)/gm;
+  let match;
+  while ((match = exportRe.exec(content)) !== null) {
+    if (match[1].length > 100) chunks.push(match[1].trim());
+  }
+  // If chunking found meaningful splits (2+), return them; otherwise return whole file
+  return chunks.length >= 2 ? chunks : [content];
+}
+
+// ── 3. Migration plan pass ────────────────────────────────────────────
+async function generateMigrationPlan(groups, allFiles) {
+  const fileList = allFiles.slice(0, 30).map(f => {
+    try {
+      const content = readFileSync(f, "utf-8").slice(0, 600);
+      return `${basename(f)}:\n${content}`;
+    } catch { return ""; }
+  }).filter(Boolean).join("\n\n---\n\n");
+
+  const prompt = `You are a DesignSync migration planner.
+Analyze these React files and create a migration plan.
+
+For each file, output ONE line:
+filename.tsx | Tier1: Dialog+Card | Tier2: custom-header→Card | Tier3: token-only
+
+Tier1 = full DS component replacement
+Tier2 = DS component wrapper + custom inner
+Tier3 = keep structure, apply tokens only
+
+Files:
+${fileList}`;
+
+  try {
+    let planRaw = "";
+    if (ANTHROPIC_KEY) {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+        body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1500, messages: [{ role: "user", content: prompt }] }),
+      });
+      const data = await res.json();
+      planRaw = data.content?.[0]?.text || "";
+    } else if (OPENAI_KEY) {
+      const res = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${OPENAI_KEY}`, "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-4o", max_tokens: 1500, messages: [{ role: "user", content: prompt }] }),
+      });
+      const data = await res.json();
+      planRaw = data.choices?.[0]?.message?.content || "";
+    }
+    return planRaw.trim();
+  } catch { return ""; }
+}
+
+// ── 4. Parallel 2x + vote ─────────────────────────────────────────────
+async function migrateWithVote(content, filename, screenshotB64) {
+  // Run two migrations in parallel, pick the one with fewer ESLint violations
+  const [r1, r2] = await Promise.allSettled([
+    migrate(content, filename, screenshotB64),
+    migrate(content, filename, screenshotB64),
+  ]);
+  const candidates = [r1, r2]
+    .filter(r => r.status === "fulfilled")
+    .map(r => r.value);
+  if (candidates.length === 0) throw new Error("Both migrations failed");
+  if (candidates.length === 1) return candidates[0];
+
+  // Write to temp files, check violations, pick winner
+  const tmp1 = `/tmp/ds_vote_a_${Date.now()}.tsx`;
+  const tmp2 = `/tmp/ds_vote_b_${Date.now()}.tsx`;
+  writeFileSync(tmp1, candidates[0]);
+  writeFileSync(tmp2, candidates[1]);
+  const v1 = getViolations(tmp1).length;
+  const v2 = getViolations(tmp2).length;
+  try { execSync(`rm -f "${tmp1}" "${tmp2}"`); } catch {}
+  return v1 <= v2 ? candidates[0] : candidates[1];
+}
+
+// ── 5. Build error feedback loop ──────────────────────────────────────
+async function buildFeedbackLoop(projectRoot, allMigratedFiles) {
+  console.log(`\n🔨  빌드 에러 검사 중...`);
+  let buildErrors = "";
+  try {
+    execSync("npm run build 2>&1", { cwd: projectRoot, stdio: ["pipe", "pipe", "pipe"], timeout: 120000 });
+    console.log(`   빌드 성공 ✅`);
+    return;
+  } catch (e) {
+    buildErrors = (e.stdout?.toString() || "") + (e.stderr?.toString() || "");
+  }
+
+  // Parse which files have build errors
+  const fileErrorMap = new Map();
+  const lines = buildErrors.split("\n");
+  for (const line of lines) {
+    for (const fp of allMigratedFiles) {
+      const name = basename(fp);
+      if (line.includes(name) && (line.includes("error") || line.includes("Error"))) {
+        if (!fileErrorMap.has(fp)) fileErrorMap.set(fp, []);
+        fileErrorMap.get(fp).push(line.trim());
+      }
+    }
+  }
+
+  if (fileErrorMap.size === 0) {
+    console.log(`   파일 특정 불가 — 빌드 로그:\n${buildErrors.slice(0, 500)}`);
+    return;
+  }
+
+  console.log(`   ${fileErrorMap.size}개 파일 빌드 에러 → AI 재수정\n`);
+  for (const [fp, errors] of fileErrorMap) {
+    process.stdout.write(`   fixing ${basename(fp)} ...`);
+    try {
+      const content = readFileSync(fp, "utf-8");
+      const errorSummary = errors.slice(0, 8).join("\n");
+      const fixed = await migrate(content, `${basename(fp)} [build errors:\n${errorSummary}]`, null);
+      writeFileSync(fp, fixed.replace(/^```(?:tsx?|jsx?)?\n?/, "").replace(/\n?```\s*$/, ""));
+      process.stdout.write(" ✅\n");
+    } catch {
+      process.stdout.write(" ❌\n");
+    }
+  }
+
+  // Second build check
+  try {
+    execSync("npm run build 2>&1", { cwd: projectRoot, stdio: "pipe", timeout: 120000 });
+    console.log(`   재빌드 성공 ✅`);
+  } catch {
+    console.log(`   재빌드 실패 — 수동 확인 필요`);
+  }
+}
+
+// ── Migrate a group of related files together ─────────────────────────
 async function migrateGroup(filePaths, screenshotB64) {
   const files = filePaths.map(fp => ({
     path: fp,
@@ -517,6 +653,18 @@ if (PROJECT_CONTEXT) {
   process.stdout.write(` 스킵\n`);
 }
 
+// ── Migration plan pass ───────────────────────────────────────────────
+process.stdout.write(`📋  마이그레이션 계획 수립 중...`);
+const migrationPlan = await generateMigrationPlan([], allFiles);
+if (migrationPlan) {
+  PROJECT_CONTEXT = PROJECT_CONTEXT
+    ? `${PROJECT_CONTEXT}\n\n━━━ MIGRATION PLAN ━━━\n${migrationPlan}`
+    : `━━━ MIGRATION PLAN ━━━\n${migrationPlan}`;
+  process.stdout.write(` 완료\n`);
+} else {
+  process.stdout.write(` 스킵\n`);
+}
+
 // Find dev server for visual mode
 let devBaseUrl = null;
 if (VISUAL_MODE) {
@@ -552,9 +700,16 @@ const groupCount = groups.filter(g => g.length > 1).length;
 console.log(`\n⚡  ${toMigrate.length}개 파일 마이그레이션 (${groupCount}개 그룹 묶음)...\n`);
 let done = 0, failed = 0;
 
-async function processSingleFile(filePath, screenshotB64) {
+async function processSingleFile(filePath, screenshotB64, useVote = false) {
   const originalContent = readFileSync(filePath, "utf-8");
-  let migrated = await migrate(originalContent, basename(filePath), screenshotB64);
+  // Use parallel vote for complex files (>100 lines), single for small ones
+  const lineCount = originalContent.split("\n").length;
+  let migrated;
+  if (useVote && lineCount > 100 && ANTHROPIC_KEY) {
+    migrated = await migrateWithVote(originalContent, basename(filePath), screenshotB64);
+  } else {
+    migrated = await migrate(originalContent, basename(filePath), screenshotB64);
+  }
   writeFileSync(filePath, migrated);
 
   let attempts = 1;
@@ -606,29 +761,29 @@ for (const group of groups) {
     }
 
     if (isGroup) {
-      // Group migration: send all files together
       const results = await migrateGroup(group, screenshotB64);
       for (const [fp, content] of results) {
         if (content) writeFileSync(fp, content);
       }
-      // ESLint fix pass on all files in group
       for (const fp of group) {
         try { execSync(`npx eslint "${fp}" --fix --quiet`, { stdio: "pipe" }); } catch {}
       }
       const violations = group.flatMap(fp => getViolations(fp));
       if (violations.length === 0) {
         process.stdout.write(" ✅\n");
+        // 5. Update PROJECT_CONTEXT with successful group migration
+        const groupNames = group.map(f => basename(f)).join(", ");
+        PROJECT_CONTEXT += `\nSuccessfully migrated group: ${groupNames}`;
       } else {
-        // Retry individually for remaining violations
         for (const fp of group) {
-          if (getViolations(fp).length > 0) await processSingleFile(fp, screenshotB64);
+          if (getViolations(fp).length > 0) await processSingleFile(fp, screenshotB64, true);
         }
         const finalV = group.flatMap(fp => getViolations(fp));
         process.stdout.write(finalV.length === 0 ? " ✅\n" : ` ⚠️  (${finalV.length}개 잔존)\n`);
       }
       done += group.length;
     } else {
-      await processSingleFile(group[0], screenshotB64);
+      await processSingleFile(group[0], screenshotB64, true);
       const finalViolations = getViolations(group[0]);
       process.stdout.write(finalViolations.length === 0 ? " ✅\n" : ` ⚠️  (${finalViolations.length}개 잔존)\n`);
       done++;
@@ -643,3 +798,8 @@ for (const group of groups) {
 console.log(`\n${"━".repeat(50)}`);
 console.log(`✅  ${done}개 완료${failed ? `  ❌  ${failed}개 실패` : ""}`);
 console.log(`${"━".repeat(50)}\n`);
+
+// ── Build feedback loop ───────────────────────────────────────────────
+const projectRoot = resolve(srcDir, "..");
+const allMigratedFiles = toMigrate;
+await buildFeedbackLoop(projectRoot, allMigratedFiles);
