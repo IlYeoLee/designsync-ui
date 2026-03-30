@@ -636,6 +636,36 @@ function findFiles(dir, result = []) {
   return result;
 }
 
+// ── Git safety branch ─────────────────────────────────────────────────
+async function createSafetyBranch(projectRoot) {
+  try {
+    // Check if this is a git repo
+    execSync("git rev-parse --is-inside-work-tree", { cwd: projectRoot, stdio: "pipe" });
+  } catch {
+    console.log(`⚠️  Git 저장소 없음 — 브랜치 생성 스킵 (수동 백업 권장)\n`);
+    return null;
+  }
+  try {
+    // Check for uncommitted changes
+    const status = execSync("git status --porcelain", { cwd: projectRoot, stdio: "pipe" }).toString().trim();
+    if (status) {
+      // Auto-stash or warn
+      console.log(`⚠️  커밋되지 않은 변경사항 감지 — 현재 브랜치에서 새 브랜치 생성\n`);
+    }
+    const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    const time = new Date().toTimeString().slice(0, 5).replace(":", "");
+    const branch = `designsync-migration-${date}-${time}`;
+    execSync(`git checkout -b "${branch}"`, { cwd: projectRoot, stdio: "pipe" });
+    console.log(`🔀  안전 브랜치 생성: ${branch}`);
+    console.log(`   복구: git checkout main && git branch -D ${branch}\n`);
+    return branch;
+  } catch (e) {
+    const msg = e.stderr?.toString() || e.message || "";
+    console.log(`⚠️  Git 브랜치 생성 실패 (${msg.trim().slice(0, 60)}) — 계속 진행\n`);
+    return null;
+  }
+}
+
 // ── Main ──────────────────────────────────────────────────────────────
 const allFiles = findFiles(srcDir);
 const mode = ANTHROPIC_KEY ? "Claude 직접" : OPENAI_KEY ? "GPT-4o 직접" : "DesignSync 서버";
@@ -643,6 +673,10 @@ const visualTag = VISUAL_MODE ? " + Vision" : "";
 
 console.log(`\n🚀  DesignSync AI Migration (${mode}${visualTag})`);
 console.log(`📁  ${srcDir}/ — ${allFiles.length}개 파일\n`);
+
+// ── Git safety branch (create before any file changes) ───────────────
+const projectRoot = resolve(srcDir, "..");
+const safetyBranch = await createSafetyBranch(projectRoot);
 
 // ── Pre-analysis pass ────────────────────────────────────────────────
 process.stdout.write(`\n🔍  프로젝트 패턴 분석 중...`);
@@ -694,7 +728,17 @@ const toMigrateSet = new Set(toMigrate.map(f => resolve(f)));
 const allGroups = buildFileGroups(toMigrate);
 
 // Filter groups: only include files that need migration
-const groups = allGroups.map(g => g.filter(f => toMigrateSet.has(resolve(f)))).filter(g => g.length > 0);
+const rawGroups = allGroups.map(g => g.filter(f => toMigrateSet.has(resolve(f)))).filter(g => g.length > 0);
+
+// Split large groups into chunks of MAX_GROUP_SIZE to avoid token overflow
+const MAX_GROUP_SIZE = 5;
+const groups = rawGroups.flatMap(g =>
+  g.length <= MAX_GROUP_SIZE
+    ? [g]
+    : Array.from({ length: Math.ceil(g.length / MAX_GROUP_SIZE) }, (_, i) =>
+        g.slice(i * MAX_GROUP_SIZE, (i + 1) * MAX_GROUP_SIZE)
+      )
+);
 
 const groupCount = groups.filter(g => g.length > 1).length;
 console.log(`\n⚡  ${toMigrate.length}개 파일 마이그레이션 (${groupCount}개 그룹 묶음)...\n`);
@@ -800,6 +844,5 @@ console.log(`✅  ${done}개 완료${failed ? `  ❌  ${failed}개 실패` : ""}
 console.log(`${"━".repeat(50)}\n`);
 
 // ── Build feedback loop ───────────────────────────────────────────────
-const projectRoot = resolve(srcDir, "..");
 const allMigratedFiles = toMigrate;
 await buildFeedbackLoop(projectRoot, allMigratedFiles);
