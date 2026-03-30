@@ -981,12 +981,14 @@ try {
         // Skip components/ui/
         if (!filePath.includes(path.sep + "components" + path.sep + "ui" + path.sep)) {
           let content = fs.readFileSync(filePath, "utf-8");
-          let anyChanged = false;
-          // Count checkbox inputs separately
-          if (/<input\b[^>]*\btype=["']checkbox["'][^>]*\/>/g.test(content)) elementCounters["input[checkbox]"]++;
+          // Count checkbox inputs separately (matches both self-closing and non-self-closing)
+          if (/<input\b[^>]*\btype=["']checkbox["'][^>]*\/?>/g.test(content)) elementCounters["input[checkbox]"]++;
+          // Strip checkbox inputs before counting generic <input> to avoid double-counting
+          const contentForCounting = content.replace(/<input\b[^>]*\btype=["']checkbox["'][^>]*\/?>/g, "");
           for (const { tag } of ELEMENT_MAP) {
             const openRe = new RegExp(`<${tag}(\\s|>|/)`, "g");
-            if (openRe.test(content)) elementCounters[tag]++;
+            const src = tag === "input" ? contentForCounting : content;
+            if (openRe.test(src)) elementCounters[tag]++;
           }
           if (migrateElements(filePath)) {
             elementMigrated++;
