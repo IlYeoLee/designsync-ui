@@ -1229,6 +1229,8 @@ if (!dsSlug) {
 }
 
 // ── Auto-migration (DESIGNSYNC_MIGRATE=true) ───────────────────────────
+// NOTE: Migration is destructive — only runs when explicitly opted in
+// Recommend running manually: node node_modules/designsync-ui/designsync-migrate.mjs src --dry-run first
 if (process.env.DESIGNSYNC_MIGRATE === "true") {
   // Auto-detect src directory
   const candidateDirs = ["src", "app", "pages", "."];
