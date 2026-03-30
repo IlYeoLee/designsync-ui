@@ -638,6 +638,45 @@ ${multiFilePrompt}`;
   return results;
 }
 
+// ── Deterministic post-processing ────────────────────────────────────
+// Fixes common AI mistakes without another AI call — runs after every migration
+function deterministicFix(content) {
+  let r = content;
+
+  // 1. Button without variant → ghost (except type="submit" CTAs)
+  r = r.replace(/<Button(\s[^>]*)?>/g, (match, attrs = "") => {
+    if (/variant\s*=/.test(attrs)) return match; // already has variant
+    if (/type\s*=\s*["']submit["']/.test(attrs)) return `<Button variant="default"${attrs}>`; // form submit → default
+    if (/size\s*=\s*["']icon["']/.test(attrs)) return `<Button variant="ghost"${attrs}>`; // icon button → ghost
+    // Check if it looks like a wrapper (contains heading/title content via className check)
+    if (/className[^=]*=.*(?:title|heading|h-auto|px-0)/i.test(attrs)) return `<Button variant="ghost"${attrs}>`;
+    return `<Button variant="ghost"${attrs}>`; // default fallback → ghost
+  });
+
+  // 2. TabsList invalid variant → fix to closest valid value
+  r = r.replace(/variant\s*=\s*["'](line|border|default|tab)["']/g, 'variant="underline"');
+
+  // 3. Button wrapping TypographyH* → must be ghost with no padding
+  r = r.replace(
+    /(<Button\s[^>]*variant="ghost"[^>]*>)\s*(<TypographyH[1-4])/g,
+    (match, btn, typo) => {
+      if (btn.includes("h-auto")) return match;
+      return btn.replace('variant="ghost"', 'variant="ghost" className="h-auto px-0 hover:bg-transparent"') + "\n      " + typo;
+    }
+  );
+
+  // 4. Remove markdown code fences if AI accidentally included them
+  r = r.replace(/^```(?:tsx?|jsx?)?\n?/, "").replace(/\n?```\s*$/, "");
+
+  // 5. size="icon" without variant → add ghost
+  r = r.replace(/<Button\s+size="icon"([^>]*?)>/g, (match, rest) => {
+    if (/variant\s*=/.test(rest)) return match;
+    return `<Button size="icon" variant="ghost"${rest}>`;
+  });
+
+  return r;
+}
+
 // ── ESLint helpers ────────────────────────────────────────────────────
 function getViolations(filePath) {
   try {
@@ -987,7 +1026,8 @@ async function processSingleFile(filePath, screenshotB64, useVote = false) {
   } else {
     migrated = await migrate(originalContent, basename(filePath), screenshotB64);
   }
-  writeFileSync(filePath, migrated);
+  // Deterministic fix before any ESLint/TS check — catches common AI mistakes
+  writeFileSync(filePath, deterministicFix(migrated));
 
   let attempts = 1;
   while (attempts < 3) {
@@ -1008,7 +1048,7 @@ async function processSingleFile(filePath, screenshotB64, useVote = false) {
 
     const retryContent = readFileSync(filePath, "utf-8");
     const raw = await migrate(retryContent, `${basename(filePath)} [retry ${attempts}, fix these errors:\n${violationSummary}]`, screenshotB64);
-    writeFileSync(filePath, raw.replace(/^```(?:tsx?|jsx?)?\n?/, "").replace(/\n?```\s*$/, ""));
+    writeFileSync(filePath, deterministicFix(raw));
     attempts++;
   }
   try { execSync(`npx eslint "${filePath}" --fix --quiet`, { stdio: "pipe" }); } catch {}
