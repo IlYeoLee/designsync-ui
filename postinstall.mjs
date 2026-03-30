@@ -87,7 +87,6 @@ function buildInstallCommand(pkgManager, packages) {
 function getMissingPackages(root, packages) {
   const nodeModules = path.join(root, "node_modules");
   return packages.filter((pkg) => {
-    // Scoped packages like @radix-ui/react-slot live at node_modules/@radix-ui/react-slot
     const pkgDir = path.join(nodeModules, ...pkg.split("/"));
     return !fs.existsSync(pkgDir);
   });
@@ -150,6 +149,22 @@ function fetchText(url) {
   });
 }
 
+// Walk all source files, skipping build/vendor dirs
+function walkSrcFiles(dir, exts, skipDirs = []) {
+  const results = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === "node_modules" || entry.name === ".next" || entry.name === "dist" || entry.name === ".git") continue;
+    if (skipDirs.includes(path.join(dir, entry.name))) continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...walkSrcFiles(full, exts, skipDirs));
+    } else if (exts.includes(path.extname(entry.name))) {
+      results.push(full);
+    }
+  }
+  return results;
+}
+
 // ── Main ─────────────────────────────────────────────────────────────
 
 const projectRoot = findProjectRoot(path.resolve(__dirname, "../../.."));
@@ -179,7 +194,6 @@ try {
     console.log("  [0/6] All peer dependencies already present");
   }
 } catch (e) {
-  // Non-fatal: components may still work if most deps are present
   console.log(`  [0/6] Peer dependency install warning: ${e.message}`);
 }
 
@@ -202,7 +216,6 @@ let copied = 0;
 for (const file of fs.readdirSync(srcComponents)) {
   const destPath = path.join(compDest, file);
   let content = fs.readFileSync(path.join(srcComponents, file), "utf-8");
-  // Fix registry-internal imports → standard @/components/ui/ path
   content = content.replace(/@\/registry\/new-york\/ui\//g, "@/components/ui/");
   fs.writeFileSync(destPath, content);
   copied++;
@@ -216,7 +229,225 @@ if (fs.existsSync(utilsSrc) && !fs.existsSync(utilsDest)) {
 
 console.log(`  [1/6] Copied ${copied} components`);
 
-// ── 2. Detect slug from .designsync.json or env ──────────────────────
+// ── 2. Icon library detection + full lucide→target rewriting ─────────
+
+const ICON_MAP = {
+  // ── Originally present ──────────────────────────────────────────────
+  ArrowLeft:            { tabler: "IconArrowLeft",         phosphor: "ArrowLeft",               remix: "RiArrowLeftLine",        hugeicons: "ArrowLeft01Icon" },
+  ArrowRight:           { tabler: "IconArrowRight",        phosphor: "ArrowRight",              remix: "RiArrowRightLine",       hugeicons: "ArrowRight01Icon" },
+  ArrowUpDown:          { tabler: "IconArrowsUpDown",      phosphor: "ArrowsDownUp",            remix: "RiArrowUpDownLine",      hugeicons: "ArrowUpDown01Icon" },
+  CalendarIcon:         { tabler: "IconCalendar",          phosphor: "Calendar",                remix: "RiCalendarLine",         hugeicons: "Calendar01Icon" },
+  CheckIcon:            { tabler: "IconCheck",             phosphor: "Check",                   remix: "RiCheckLine",            hugeicons: "Tick01Icon" },
+  ChevronDownIcon:      { tabler: "IconChevronDown",       phosphor: "CaretDown",               remix: "RiArrowDownSLine",       hugeicons: "ArrowDown01Icon" },
+  ChevronLeft:          { tabler: "IconChevronLeft",       phosphor: "CaretLeft",               remix: "RiArrowLeftSLine",       hugeicons: "ArrowLeft01Icon" },
+  ChevronRight:         { tabler: "IconChevronRight",      phosphor: "CaretRight",              remix: "RiArrowRightSLine",      hugeicons: "ArrowRight01Icon" },
+  ChevronRightIcon:     { tabler: "IconChevronRight",      phosphor: "CaretRight",              remix: "RiArrowRightSLine",      hugeicons: "ArrowRight01Icon" },
+  ChevronUpIcon:        { tabler: "IconChevronUp",         phosphor: "CaretUp",                 remix: "RiArrowUpSLine",         hugeicons: "ArrowUp01Icon" },
+  ChevronsUpDown:       { tabler: "IconSelector",          phosphor: "CaretUpDown",             remix: "RiExpandUpDownLine",     hugeicons: "UnfoldMore01Icon" },
+  CircleIcon:           { tabler: "IconCircle",            phosphor: "Circle",                  remix: "RiCircleLine",           hugeicons: "Circle01Icon" },
+  GripVerticalIcon:     { tabler: "IconGripVertical",      phosphor: "DotsSixVertical",         remix: "RiDraggable",            hugeicons: "DragDropVerticalIcon" },
+  MenuIcon:             { tabler: "IconMenu2",             phosphor: "List",                    remix: "RiMenuLine",             hugeicons: "Menu01Icon" },
+  MinusIcon:            { tabler: "IconMinus",             phosphor: "Minus",                   remix: "RiSubtractLine",         hugeicons: "MinusSignIcon" },
+  MoreHorizontalIcon:   { tabler: "IconDotsHorizontal",    phosphor: "DotsThree",               remix: "RiMore2Line",            hugeicons: "MoreHorizontalIcon" },
+  PanelLeftIcon:        { tabler: "IconLayoutSidebar",     phosphor: "SidebarSimple",           remix: "RiLayoutLeftLine",       hugeicons: "LeftToRightBlockQuoteIcon" },
+  SearchIcon:           { tabler: "IconSearch",            phosphor: "MagnifyingGlass",         remix: "RiSearchLine",           hugeicons: "Search01Icon" },
+  XIcon:                { tabler: "IconX",                 phosphor: "X",                       remix: "RiCloseLine",            hugeicons: "Cancel01Icon" },
+
+  // ── Navigation / Directional ─────────────────────────────────────────
+  Home:                 { tabler: "IconHome",              phosphor: "House",                   remix: "RiHomeLine",             hugeicons: "Home01Icon" },
+  ArrowUp:              { tabler: "IconArrowUp",           phosphor: "ArrowUp",                 remix: "RiArrowUpLine",          hugeicons: "ArrowUp01Icon" },
+  ArrowDown:            { tabler: "IconArrowDown",         phosphor: "ArrowDown",               remix: "RiArrowDownLine",        hugeicons: "ArrowDown01Icon" },
+  ChevronDown:          { tabler: "IconChevronDown",       phosphor: "CaretDown",               remix: "RiArrowDownSLine",       hugeicons: "ArrowDown01Icon" },
+  ChevronUp:            { tabler: "IconChevronUp",         phosphor: "CaretUp",                 remix: "RiArrowUpSLine",         hugeicons: "ArrowUp01Icon" },
+  Navigation:           { tabler: "IconNavigation",        phosphor: "NavigationArrow",         remix: "RiNavigationLine",       hugeicons: "Navigation01Icon" },
+  Compass:              { tabler: "IconCompass",           phosphor: "Compass",                 remix: "RiCompassLine",          hugeicons: "Compass01Icon" },
+  MapPin:               { tabler: "IconMapPin",            phosphor: "MapPin",                  remix: "RiMapPinLine",           hugeicons: "Location01Icon" },
+  Map:                  { tabler: "IconMap",               phosphor: "Map",                     remix: "RiMapLine",              hugeicons: "Map01Icon" },
+
+  // ── Settings / System ────────────────────────────────────────────────
+  Settings:             { tabler: "IconSettings",          phosphor: "Gear",                    remix: "RiSettings4Line",        hugeicons: "Settings01Icon" },
+  Sliders:              { tabler: "IconAdjustments",       phosphor: "Sliders",                 remix: "RiSlidersLine",          hugeicons: "Slider01Icon" },
+  SlidersHorizontal:    { tabler: "IconAdjustmentsHorizontal", phosphor: "Sliders",            remix: "RiEqualizerLine",        hugeicons: "Slider02Icon" },
+  Power:                { tabler: "IconPower",             phosphor: "Power",                   remix: "RiPowerLine",            hugeicons: "PowerIcon" },
+  Zap:                  { tabler: "IconBolt",              phosphor: "Lightning",               remix: "RiFlashlightLine",       hugeicons: "Zap01Icon" },
+  Toggle:               { tabler: "IconToggleRight",       phosphor: "Toggle",                  remix: "RiToggleLine",           hugeicons: "ToggleOffIcon" },
+  ToggleLeft:           { tabler: "IconToggleLeft",        phosphor: "ToggleLeft",              remix: "RiToggleLine",           hugeicons: "ToggleOffIcon" },
+  ToggleRight:          { tabler: "IconToggleRight",       phosphor: "ToggleRight",             remix: "RiToggleFill",           hugeicons: "ToggleOnIcon" },
+
+  // ── Users / Auth ─────────────────────────────────────────────────────
+  User:                 { tabler: "IconUser",              phosphor: "User",                    remix: "RiUserLine",             hugeicons: "User01Icon" },
+  Users:                { tabler: "IconUsers",             phosphor: "Users",                   remix: "RiGroupLine",            hugeicons: "UserGroup01Icon" },
+  UserPlus:             { tabler: "IconUserPlus",          phosphor: "UserPlus",                remix: "RiUserAddLine",          hugeicons: "UserAdd01Icon" },
+  UserMinus:            { tabler: "IconUserMinus",         phosphor: "UserMinus",               remix: "RiUserMinusLine",        hugeicons: "UserRemove01Icon" },
+  UserCheck:            { tabler: "IconUserCheck",         phosphor: "UserCheck",               remix: "RiUserFollowLine",       hugeicons: "UserCheck01Icon" },
+  LogIn:                { tabler: "IconLogin",             phosphor: "SignIn",                  remix: "RiLoginBoxLine",         hugeicons: "Login01Icon" },
+  LogOut:               { tabler: "IconLogout",            phosphor: "SignOut",                 remix: "RiLogoutBoxLine",        hugeicons: "Logout01Icon" },
+
+  // ── Search / Zoom ────────────────────────────────────────────────────
+  Search:               { tabler: "IconSearch",            phosphor: "MagnifyingGlass",         remix: "RiSearchLine",           hugeicons: "Search01Icon" },
+  ZoomIn:               { tabler: "IconZoomIn",            phosphor: "MagnifyingGlassPlus",     remix: "RiZoomInLine",           hugeicons: "ZoomInAreaIcon" },
+  ZoomOut:              { tabler: "IconZoomOut",           phosphor: "MagnifyingGlassMinus",    remix: "RiZoomOutLine",          hugeicons: "ZoomOutAreaIcon" },
+
+  // ── CRUD / Editing ───────────────────────────────────────────────────
+  Plus:                 { tabler: "IconPlus",              phosphor: "Plus",                    remix: "RiAddLine",              hugeicons: "Add01Icon" },
+  Minus:                { tabler: "IconMinus",             phosphor: "Minus",                   remix: "RiSubtractLine",         hugeicons: "MinusSignIcon" },
+  X:                    { tabler: "IconX",                 phosphor: "X",                       remix: "RiCloseLine",            hugeicons: "Cancel01Icon" },
+  Check:                { tabler: "IconCheck",             phosphor: "Check",                   remix: "RiCheckLine",            hugeicons: "Tick01Icon" },
+  Edit:                 { tabler: "IconEdit",              phosphor: "PencilSimple",            remix: "RiEditLine",             hugeicons: "Edit01Icon" },
+  Edit2:                { tabler: "IconEdit",              phosphor: "PencilSimple",            remix: "RiEditLine",             hugeicons: "Edit02Icon" },
+  Edit3:                { tabler: "IconEdit",              phosphor: "PencilSimple",            remix: "RiEditLine",             hugeicons: "Edit03Icon" },
+  Pencil:               { tabler: "IconPencil",            phosphor: "Pencil",                  remix: "RiPencilLine",           hugeicons: "PencilEdit01Icon" },
+  Trash:                { tabler: "IconTrash",             phosphor: "Trash",                   remix: "RiDeleteBinLine",        hugeicons: "Delete01Icon" },
+  Trash2:               { tabler: "IconTrash",             phosphor: "Trash",                   remix: "RiDeleteBin2Line",       hugeicons: "Delete02Icon" },
+  Delete:               { tabler: "IconTrash",             phosphor: "Trash",                   remix: "RiDeleteBackLine",       hugeicons: "Delete01Icon" },
+  Copy:                 { tabler: "IconCopy",              phosphor: "Copy",                    remix: "RiFileCopyLine",         hugeicons: "Copy01Icon" },
+  Clipboard:            { tabler: "IconClipboard",         phosphor: "Clipboard",               remix: "RiClipboardLine",        hugeicons: "Clipboard01Icon" },
+  Save:                 { tabler: "IconDeviceFloppy",      phosphor: "FloppyDisk",              remix: "RiSave2Line",            hugeicons: "FloppyDiskIcon" },
+
+  // ── Files / Folders ──────────────────────────────────────────────────
+  Download:             { tabler: "IconDownload",          phosphor: "DownloadSimple",          remix: "RiDownloadLine",         hugeicons: "Download01Icon" },
+  Upload:               { tabler: "IconUpload",            phosphor: "UploadSimple",            remix: "RiUploadLine",           hugeicons: "Upload01Icon" },
+  File:                 { tabler: "IconFile",              phosphor: "File",                    remix: "RiFileLine",             hugeicons: "File01Icon" },
+  FileText:             { tabler: "IconFileText",          phosphor: "FileText",                remix: "RiFileTextLine",         hugeicons: "FileText01Icon" },
+  Folder:               { tabler: "IconFolder",            phosphor: "Folder",                  remix: "RiFolderLine",           hugeicons: "Folder01Icon" },
+  FolderOpen:           { tabler: "IconFolderOpen",        phosphor: "FolderOpen",              remix: "RiFolderOpenLine",       hugeicons: "FolderOpen01Icon" },
+  Paperclip:            { tabler: "IconPaperclip",         phosphor: "Paperclip",               remix: "RiAttachment2",          hugeicons: "AttachmentIcon" },
+  Attach:               { tabler: "IconPaperclip",         phosphor: "Paperclip",               remix: "RiAttachment2",          hugeicons: "AttachmentIcon" },
+
+  // ── Visibility / Access ──────────────────────────────────────────────
+  Eye:                  { tabler: "IconEye",               phosphor: "Eye",                     remix: "RiEyeLine",              hugeicons: "Eye01Icon" },
+  EyeOff:               { tabler: "IconEyeOff",            phosphor: "EyeSlash",                remix: "RiEyeOffLine",           hugeicons: "EyeOffIcon" },
+  Lock:                 { tabler: "IconLock",              phosphor: "Lock",                    remix: "RiLockLine",             hugeicons: "Lock01Icon" },
+  Unlock:               { tabler: "IconLockOpen",          phosphor: "LockOpen",                remix: "RiLockUnlockLine",       hugeicons: "Unlock01Icon" },
+  Key:                  { tabler: "IconKey",               phosphor: "Key",                     remix: "RiKeyLine",              hugeicons: "Key01Icon" },
+  Shield:               { tabler: "IconShield",            phosphor: "Shield",                  remix: "RiShieldLine",           hugeicons: "Shield01Icon" },
+
+  // ── Notifications / Alerts ───────────────────────────────────────────
+  Bell:                 { tabler: "IconBell",              phosphor: "Bell",                    remix: "RiNotificationLine",     hugeicons: "Notification01Icon" },
+  BellOff:              { tabler: "IconBellOff",           phosphor: "BellSlash",               remix: "RiNotificationOffLine",  hugeicons: "Notification02Icon" },
+  AlertCircle:          { tabler: "IconAlertCircle",       phosphor: "WarningCircle",           remix: "RiErrorWarningLine",     hugeicons: "Alert01Icon" },
+  AlertTriangle:        { tabler: "IconAlertTriangle",     phosphor: "Warning",                 remix: "RiAlertLine",            hugeicons: "AlertTriangleIcon" },
+  Info:                 { tabler: "IconInfoCircle",        phosphor: "Info",                    remix: "RiInformationLine",      hugeicons: "InformationCircleIcon" },
+  HelpCircle:           { tabler: "IconHelpCircle",        phosphor: "Question",                remix: "RiQuestionLine",         hugeicons: "HelpCircleIcon" },
+  CheckCircle:          { tabler: "IconCircleCheck",       phosphor: "CheckCircle",             remix: "RiCheckboxCircleLine",   hugeicons: "CheckmarkCircle01Icon" },
+  XCircle:              { tabler: "IconCircleX",           phosphor: "XCircle",                 remix: "RiCloseCircleLine",      hugeicons: "CancelCircleIcon" },
+
+  // ── Communication ────────────────────────────────────────────────────
+  Mail:                 { tabler: "IconMail",              phosphor: "Envelope",                remix: "RiMailLine",             hugeicons: "Mail01Icon" },
+  Phone:                { tabler: "IconPhone",             phosphor: "Phone",                   remix: "RiPhoneLine",            hugeicons: "Call01Icon" },
+  Globe:                { tabler: "IconWorld",             phosphor: "Globe",                   remix: "RiGlobalLine",           hugeicons: "EarthIcon" },
+  MessageCircle:        { tabler: "IconMessageCircle",     phosphor: "ChatCircle",              remix: "RiMessage2Line",         hugeicons: "MessageCircle01Icon" },
+  MessageSquare:        { tabler: "IconMessage",           phosphor: "ChatSquare",              remix: "RiMessageLine",          hugeicons: "Message01Icon" },
+  Send:                 { tabler: "IconSend",              phosphor: "PaperPlaneRight",         remix: "RiSendPlaneLine",        hugeicons: "Send01Icon" },
+  Share:                { tabler: "IconShare",             phosphor: "ShareNetwork",            remix: "RiShareLine",            hugeicons: "Share01Icon" },
+  Share2:               { tabler: "IconShare2",            phosphor: "ShareNetwork",            remix: "RiShareForwardLine",     hugeicons: "Share02Icon" },
+
+  // ── Loading / Refresh ────────────────────────────────────────────────
+  Loader:               { tabler: "IconLoader",            phosphor: "CircleNotch",             remix: "RiLoader4Line",          hugeicons: "Loading01Icon" },
+  Loader2:              { tabler: "IconLoader2",           phosphor: "CircleNotch",             remix: "RiLoader5Line",          hugeicons: "Loading02Icon" },
+  RefreshCw:            { tabler: "IconRefresh",           phosphor: "ArrowClockwise",          remix: "RiRefreshLine",          hugeicons: "RefreshIcon" },
+  RotateCw:             { tabler: "IconRotateClockwise",   phosphor: "ArrowClockwise",          remix: "RiRestartLine",          hugeicons: "RotateRight01Icon" },
+  RotateCcw:            { tabler: "IconRotateCounterClockwise", phosphor: "ArrowCounterClockwise", remix: "RiAnticlockwise2Line", hugeicons: "RotateLeft01Icon" },
+
+  // ── Links / Navigation Assist ────────────────────────────────────────
+  ExternalLink:         { tabler: "IconExternalLink",      phosphor: "ArrowSquareOut",          remix: "RiExternalLinkLine",     hugeicons: "LinkSquare01Icon" },
+  Link:                 { tabler: "IconLink",              phosphor: "Link",                    remix: "RiLinkM",                hugeicons: "Link01Icon" },
+  Link2:                { tabler: "IconLink",              phosphor: "Link",                    remix: "RiLinkM",                hugeicons: "Link02Icon" },
+
+  // ── Resize / Window ──────────────────────────────────────────────────
+  Maximize:             { tabler: "IconMaximize",          phosphor: "CornersOut",              remix: "RiFullscreenLine",       hugeicons: "MaximizeScreen01Icon" },
+  Minimize:             { tabler: "IconMinimize",          phosphor: "CornersIn",               remix: "RiFullscreenExitLine",   hugeicons: "MinimizeScreen01Icon" },
+
+  // ── Layout / UI Structure ────────────────────────────────────────────
+  Menu:                 { tabler: "IconMenu2",             phosphor: "List",                    remix: "RiMenuLine",             hugeicons: "Menu01Icon" },
+  MoreHorizontal:       { tabler: "IconDotsHorizontal",    phosphor: "DotsThree",               remix: "RiMore2Line",            hugeicons: "MoreHorizontalIcon" },
+  MoreVertical:         { tabler: "IconDotsVertical",      phosphor: "DotsThreeVertical",       remix: "RiMoreLine",             hugeicons: "MoreVerticalIcon" },
+  Ellipsis:             { tabler: "IconDotsHorizontal",    phosphor: "DotsThree",               remix: "RiMore2Line",            hugeicons: "MoreHorizontalIcon" },
+  Grid:                 { tabler: "IconGridDots",          phosphor: "GridFour",                remix: "RiGridLine",             hugeicons: "Grid01Icon" },
+  LayoutGrid:           { tabler: "IconGridDots",          phosphor: "GridFour",                remix: "RiLayoutGridLine",       hugeicons: "GridViewIcon" },
+  Layout:               { tabler: "IconLayout",            phosphor: "Layout",                  remix: "RiLayoutLine",           hugeicons: "Layout01Icon" },
+  Sidebar:              { tabler: "IconLayoutSidebar",     phosphor: "SidebarSimple",           remix: "RiLayoutLeftLine",       hugeicons: "Sidebar01Icon" },
+  PanelLeft:            { tabler: "IconLayoutSidebar",     phosphor: "SidebarSimple",           remix: "RiLayoutLeftLine",       hugeicons: "LeftToRightBlockQuoteIcon" },
+  List:                 { tabler: "IconList",              phosphor: "List",                    remix: "RiListUnordered",        hugeicons: "ListViewIcon" },
+  Table:                { tabler: "IconTable",             phosphor: "Table",                   remix: "RiTableLine",            hugeicons: "Table01Icon" },
+  Filter:               { tabler: "IconFilter",            phosphor: "Funnel",                  remix: "RiFilterLine",           hugeicons: "FilterHorizontalIcon" },
+  SortAsc:              { tabler: "IconSortAscending",     phosphor: "SortAscending",           remix: "RiSortAsc",              hugeicons: "SortByUp01Icon" },
+  SortDesc:             { tabler: "IconSortDescending",    phosphor: "SortDescending",          remix: "RiSortDesc",             hugeicons: "SortByDown01Icon" },
+
+  // ── Data / Infrastructure ────────────────────────────────────────────
+  Database:             { tabler: "IconDatabase",          phosphor: "Database",                remix: "RiDatabaseLine",         hugeicons: "Database01Icon" },
+  Server:               { tabler: "IconServer",            phosphor: "HardDrives",              remix: "RiServerLine",           hugeicons: "Server01Icon" },
+  Cloud:                { tabler: "IconCloud",             phosphor: "Cloud",                   remix: "RiCloudLine",            hugeicons: "Cloud01Icon" },
+  CloudOff:             { tabler: "IconCloudOff",          phosphor: "CloudSlash",              remix: "RiCloudOffLine",         hugeicons: "Cloud02Icon" },
+  Wifi:                 { tabler: "IconWifi",              phosphor: "Wifi",                    remix: "RiWifiLine",             hugeicons: "Wifi01Icon" },
+  WifiOff:              { tabler: "IconWifiOff",           phosphor: "WifiX",                   remix: "RiWifiOffLine",          hugeicons: "WifiOff01Icon" },
+  Bluetooth:            { tabler: "IconBluetooth",         phosphor: "Bluetooth",               remix: "RiBluetoothLine",        hugeicons: "BluetoothIcon" },
+
+  // ── Media / Playback ─────────────────────────────────────────────────
+  Play:                 { tabler: "IconPlayerPlay",        phosphor: "Play",                    remix: "RiPlayLine",             hugeicons: "Play01Icon" },
+  Pause:                { tabler: "IconPlayerPause",       phosphor: "Pause",                   remix: "RiPauseLine",            hugeicons: "PauseIcon" },
+  Stop:                 { tabler: "IconPlayerStop",        phosphor: "Stop",                    remix: "RiStopLine",             hugeicons: "StopIcon" },
+  SkipBack:             { tabler: "IconPlayerSkipBack",    phosphor: "SkipBack",                remix: "RiSkipBackLine",         hugeicons: "PreviousIcon" },
+  SkipForward:          { tabler: "IconPlayerSkipForward", phosphor: "SkipForward",             remix: "RiSkipForwardLine",      hugeicons: "NextIcon" },
+  Volume:               { tabler: "IconVolume",            phosphor: "Speaker",                 remix: "RiVolumeMuteLine",       hugeicons: "Volume01Icon" },
+  Volume2:              { tabler: "IconVolume2",           phosphor: "SpeakerHigh",             remix: "RiVolumeUpLine",         hugeicons: "Volume02Icon" },
+  VolumeX:              { tabler: "IconVolumeOff",         phosphor: "SpeakerX",                remix: "RiVolumeMuteLine",       hugeicons: "VolumeMuteIcon" },
+  Mic:                  { tabler: "IconMicrophone",        phosphor: "Microphone",              remix: "RiMicLine",              hugeicons: "Microphone01Icon" },
+  MicOff:               { tabler: "IconMicrophoneOff",     phosphor: "MicrophoneSlash",         remix: "RiMicOffLine",           hugeicons: "MicrophoneMuteIcon" },
+
+  // ── Devices ──────────────────────────────────────────────────────────
+  Monitor:              { tabler: "IconDeviceDesktop",     phosphor: "Monitor",                 remix: "RiComputerLine",         hugeicons: "ComputerIcon" },
+  Smartphone:           { tabler: "IconDeviceMobile",      phosphor: "DeviceMobile",            remix: "RiSmartphoneLine",       hugeicons: "SmartPhone01Icon" },
+  Tablet:               { tabler: "IconDeviceTablet",      phosphor: "DeviceTablet",            remix: "RiTabletLine",           hugeicons: "Tablet01Icon" },
+  Laptop:               { tabler: "IconDeviceLaptop",      phosphor: "Laptop",                  remix: "RiMacbookLine",          hugeicons: "Laptop01Icon" },
+  Camera:               { tabler: "IconCamera",            phosphor: "Camera",                  remix: "RiCameraLine",           hugeicons: "Camera01Icon" },
+
+  // ── Media Content ────────────────────────────────────────────────────
+  Image:                { tabler: "IconPhoto",             phosphor: "Image",                   remix: "RiImageLine",            hugeicons: "Image01Icon" },
+  Video:                { tabler: "IconVideo",             phosphor: "Video",                   remix: "RiVideoLine",            hugeicons: "Video01Icon" },
+
+  // ── Date / Time ──────────────────────────────────────────────────────
+  Calendar:             { tabler: "IconCalendar",          phosphor: "Calendar",                remix: "RiCalendarLine",         hugeicons: "Calendar01Icon" },
+  Clock:                { tabler: "IconClock",             phosphor: "Clock",                   remix: "RiTimeLine",             hugeicons: "Clock01Icon" },
+  Timer:                { tabler: "IconTimer",             phosphor: "Timer",                   remix: "RiTimerLine",            hugeicons: "Timer01Icon" },
+  AlarmClock:           { tabler: "IconAlarm",             phosphor: "Alarm",                   remix: "RiAlarmLine",            hugeicons: "AlarmClockIcon" },
+  History:              { tabler: "IconHistory",           phosphor: "ClockCounterClockwise",   remix: "RiHistoryLine",          hugeicons: "TimeHistoryIcon" },
+
+  // ── Charts / Analytics ───────────────────────────────────────────────
+  Chart:                { tabler: "IconChartBar",          phosphor: "ChartBar",                remix: "RiBarChartLine",         hugeicons: "Chart01Icon" },
+  BarChart:             { tabler: "IconChartBar",          phosphor: "ChartBar",                remix: "RiBarChartLine",         hugeicons: "BarChart01Icon" },
+  BarChart2:            { tabler: "IconChartBar2",         phosphor: "ChartBar",                remix: "RiBarChart2Line",        hugeicons: "BarChart02Icon" },
+  LineChart:            { tabler: "IconChartLine",         phosphor: "ChartLine",               remix: "RiLineChartLine",        hugeicons: "ChartLineData01Icon" },
+  PieChart:             { tabler: "IconChartPie",          phosphor: "ChartPie",                remix: "RiPieChartLine",         hugeicons: "PieChartIcon" },
+  TrendingUp:           { tabler: "IconTrendingUp",        phosphor: "TrendUp",                 remix: "RiLineChartLine",        hugeicons: "TrendingUp01Icon" },
+  TrendingDown:         { tabler: "IconTrendingDown",      phosphor: "TrendDown",               remix: "RiLineChartLine",        hugeicons: "TrendingDown01Icon" },
+
+  // ── Commerce ─────────────────────────────────────────────────────────
+  DollarSign:           { tabler: "IconCurrencyDollar",    phosphor: "CurrencyDollar",          remix: "RiMoneyDollarCircleLine", hugeicons: "Dollar01Icon" },
+  CreditCard:           { tabler: "IconCreditCard",        phosphor: "CreditCard",              remix: "RiBankCardLine",         hugeicons: "CreditCardIcon" },
+  ShoppingCart:         { tabler: "IconShoppingCart",      phosphor: "ShoppingCart",            remix: "RiShoppingCartLine",     hugeicons: "ShoppingCart01Icon" },
+  ShoppingBag:          { tabler: "IconShoppingBag",       phosphor: "ShoppingBag",             remix: "RiShoppingBagLine",      hugeicons: "ShoppingBag01Icon" },
+  Package:              { tabler: "IconPackage",           phosphor: "Package",                 remix: "RiGiftLine",             hugeicons: "Package01Icon" },
+
+  // ── Social / Engagement ──────────────────────────────────────────────
+  Star:                 { tabler: "IconStar",              phosphor: "Star",                    remix: "RiStarLine",             hugeicons: "Star01Icon" },
+  Heart:                { tabler: "IconHeart",             phosphor: "Heart",                   remix: "RiHeartLine",            hugeicons: "FavouriteIcon" },
+  Bookmark:             { tabler: "IconBookmark",          phosphor: "Bookmark",                remix: "RiBookmarkLine",         hugeicons: "Bookmark01Icon" },
+  Tag:                  { tabler: "IconTag",               phosphor: "Tag",                     remix: "RiPriceTagLine",         hugeicons: "Tag01Icon" },
+  Tags:                 { tabler: "IconTags",              phosphor: "Tag",                     remix: "RiPriceTags2Line",       hugeicons: "Tag02Icon" },
+  Flag:                 { tabler: "IconFlag",              phosphor: "Flag",                    remix: "RiFlagLine",             hugeicons: "Flag01Icon" },
+  Ban:                  { tabler: "IconBan",               phosphor: "Prohibit",                remix: "RiForbidLine",           hugeicons: "BlockedIcon" },
+};
+
+const LIBRARY_PKG = {
+  lucide:     "lucide-react",
+  tabler:     "@tabler/icons-react",
+  phosphor:   "@phosphor-icons/react",
+  remix:      "@remixicon/react",
+  hugeicons:  "@hugeicons/react",
+};
+
+// Detect slug from .designsync.json or env
 let dsSlug = process.env.DESIGNSYNC_SLUG || "";
 
 const dsConfigPath = path.join(projectRoot, ".designsync.json");
@@ -227,37 +458,6 @@ if (fs.existsSync(dsConfigPath)) {
     if (!dsSlug) dsSlug = dsConfig.slug || "";
   } catch {}
 }
-
-// ── 2b. Fetch icon library from API if slug exists ───────────────────
-const ICON_MAP = {
-  ArrowLeft:          { tabler: "IconArrowLeft",        phosphor: "ArrowLeft",        remix: "RiArrowLeftLine",       hugeicons: "ArrowLeft01Icon" },
-  ArrowRight:         { tabler: "IconArrowRight",       phosphor: "ArrowRight",       remix: "RiArrowRightLine",      hugeicons: "ArrowRight01Icon" },
-  ArrowUpDown:        { tabler: "IconArrowsUpDown",     phosphor: "ArrowsDownUp",     remix: "RiArrowUpDownLine",     hugeicons: "ArrowUpDown01Icon" },
-  CalendarIcon:       { tabler: "IconCalendar",         phosphor: "Calendar",         remix: "RiCalendarLine",        hugeicons: "Calendar01Icon" },
-  CheckIcon:          { tabler: "IconCheck",            phosphor: "Check",            remix: "RiCheckLine",           hugeicons: "Tick01Icon" },
-  ChevronDownIcon:    { tabler: "IconChevronDown",      phosphor: "CaretDown",        remix: "RiArrowDownSLine",      hugeicons: "ArrowDown01Icon" },
-  ChevronLeft:        { tabler: "IconChevronLeft",      phosphor: "CaretLeft",        remix: "RiArrowLeftSLine",      hugeicons: "ArrowLeft01Icon" },
-  ChevronRight:       { tabler: "IconChevronRight",     phosphor: "CaretRight",       remix: "RiArrowRightSLine",     hugeicons: "ArrowRight01Icon" },
-  ChevronRightIcon:   { tabler: "IconChevronRight",     phosphor: "CaretRight",       remix: "RiArrowRightSLine",     hugeicons: "ArrowRight01Icon" },
-  ChevronUpIcon:      { tabler: "IconChevronUp",        phosphor: "CaretUp",          remix: "RiArrowUpSLine",        hugeicons: "ArrowUp01Icon" },
-  ChevronsUpDown:     { tabler: "IconSelector",         phosphor: "CaretUpDown",      remix: "RiExpandUpDownLine",    hugeicons: "UnfoldMore01Icon" },
-  CircleIcon:         { tabler: "IconCircle",           phosphor: "Circle",           remix: "RiCircleLine",          hugeicons: "Circle01Icon" },
-  GripVerticalIcon:   { tabler: "IconGripVertical",     phosphor: "DotsSixVertical",  remix: "RiDraggable",           hugeicons: "DragDropVerticalIcon" },
-  MenuIcon:           { tabler: "IconMenu2",            phosphor: "List",             remix: "RiMenuLine",            hugeicons: "Menu01Icon" },
-  MinusIcon:          { tabler: "IconMinus",            phosphor: "Minus",            remix: "RiSubtractLine",        hugeicons: "MinusSignIcon" },
-  MoreHorizontalIcon: { tabler: "IconDotsHorizontal",   phosphor: "DotsThree",        remix: "RiMore2Line",           hugeicons: "MoreHorizontalIcon" },
-  PanelLeftIcon:      { tabler: "IconLayoutSidebar",    phosphor: "SidebarSimple",    remix: "RiLayoutLeftLine",      hugeicons: "LeftToRightBlockQuoteIcon" },
-  SearchIcon:         { tabler: "IconSearch",           phosphor: "MagnifyingGlass",  remix: "RiSearchLine",          hugeicons: "Search01Icon" },
-  XIcon:              { tabler: "IconX",                phosphor: "X",                remix: "RiCloseLine",           hugeicons: "Cancel01Icon" },
-};
-
-const LIBRARY_PKG = {
-  lucide:     "lucide-react",
-  tabler:     "@tabler/icons-react",
-  phosphor:   "@phosphor-icons/react",
-  remix:      "@remixicon/react",
-  hugeicons:  "@hugeicons/react",
-};
 
 let iconLibrary = dsConfig.iconLibrary || "lucide";
 
@@ -273,40 +473,51 @@ if (dsSlug) {
   } catch {}
 }
 
-// Rewrite icon imports in copied component files
+// Rewrite lucide imports in a single file, returns whether file was changed
+function rewriteIconImports(filePath, targetPkg, lib) {
+  let content = fs.readFileSync(filePath, "utf-8");
+  if (!content.includes("lucide-react")) return false;
+  const next = content.replace(
+    /import\s*\{([^}]+)\}\s*from\s*["']lucide-react["']/g,
+    (_match, importList) => {
+      const icons = importList.split(",").map((s) => s.trim()).filter(Boolean);
+      const mapped = icons.map((icon) => {
+        const entry = ICON_MAP[icon];
+        if (!entry || !entry[lib]) return icon;
+        const newName = entry[lib];
+        return newName === icon ? icon : `${newName} as ${icon}`;
+      });
+      return `import { ${mapped.join(", ")} } from "${targetPkg}"`;
+    }
+  );
+  if (next !== content) {
+    fs.writeFileSync(filePath, next);
+    return true;
+  }
+  return false;
+}
+
 if (iconLibrary !== "lucide") {
   const targetPkg = LIBRARY_PKG[iconLibrary];
   if (targetPkg) {
     let rewritten = 0;
-    for (const file of fs.readdirSync(compDest)) {
-      const filePath = path.join(compDest, file);
-      let content = fs.readFileSync(filePath, "utf-8");
-      if (content.includes("lucide-react")) {
-        content = content.replace(
-          /import\s*\{([^}]+)\}\s*from\s*"lucide-react"/g,
-          (_match, importList) => {
-            const icons = importList.split(",").map((s) => s.trim()).filter(Boolean);
-            const mapped = icons.map((icon) => {
-              const entry = ICON_MAP[icon];
-              if (!entry || !entry[iconLibrary]) return icon;
-              const newName = entry[iconLibrary];
-              return newName === icon ? icon : `${newName} as ${icon}`;
-            });
-            return `import { ${mapped.join(", ")} } from "${targetPkg}"`;
-          }
-        );
-        fs.writeFileSync(filePath, content);
-        rewritten++;
-      }
+    const srcDir = useSrc ? path.join(projectRoot, "src") : projectRoot;
+    const exts = [".tsx", ".ts", ".jsx", ".js"];
+    const allFiles = walkSrcFiles(srcDir, exts);
+
+    for (const filePath of allFiles) {
+      try {
+        if (rewriteIconImports(filePath, targetPkg, iconLibrary)) rewritten++;
+      } catch {}
     }
 
-    // Install the non-lucide icon package using the detected package manager
+    // Install the non-lucide icon package
     try {
       const iconInstallCmd = buildInstallCommand(pkgManager, [targetPkg]);
       execSync(iconInstallCmd, { cwd: projectRoot, stdio: "ignore" });
     } catch {}
 
-    console.log(`  [2/6] Icon library: ${iconLibrary} (${rewritten} files rewritten)`);
+    console.log(`  [2/6] Icon library: ${iconLibrary} (${rewritten} files rewritten across all src/)`);
   }
 } else {
   console.log(`  [2/6] Icon library: lucide (default)`);
@@ -378,14 +589,11 @@ if (cssFile && dsSlug) {
   const liveUrl = `${CDN}/r/${dsSlug}/designsync-tokens.css`;
   let cssContent = fs.readFileSync(cssFile, "utf-8");
 
-  // Remove old @import url(...designsync-tokens.css) if present
   cssContent = cssContent.replace(/^@import\s+url\(["'][^"']*designsync-tokens\.css["']\);?\s*\n?/m, "");
-  // Remove old theme block if present
   cssContent = cssContent.replace(/\/\* designsync-theme-start \*\/[\s\S]*?\/\* designsync-theme-end \*\/\s*\n?/m, "");
 
   const themeBlock = `/* designsync-theme-start */\n${themeInlineBlock}\n/* designsync-theme-end */`;
 
-  // Insert @theme inline AFTER @import "tailwindcss"
   const tailwindImportRegex = /(@import\s+["']tailwindcss["'];?\s*\n?)/;
   if (tailwindImportRegex.test(cssContent)) {
     cssContent = cssContent.replace(tailwindImportRegex, `$1\n${themeBlock}\n`);
@@ -394,7 +602,6 @@ if (cssFile && dsSlug) {
   }
   fs.writeFileSync(cssFile, cssContent);
 
-  // Inject <link> tag into index.html for live token sync
   const htmlCandidates = ["index.html", "public/index.html", "src/index.html"];
   const linkTag = `<link rel="stylesheet" href="${liveUrl}" />`;
   for (const htmlPath of htmlCandidates) {
@@ -404,7 +611,6 @@ if (cssFile && dsSlug) {
       if (!html.includes("designsync-tokens.css")) {
         html = html.replace("</head>", `    ${linkTag}\n  </head>`);
       }
-      // Add live reload script (refreshes tokens every 5s without page reload)
       if (!html.includes("designsync-live-reload")) {
         const liveScript = `<script data-designsync-live-reload>
     (function(){var l=document.querySelector('link[href*="designsync-tokens"]');if(l)setInterval(function(){l.href=l.href.split("?")[0]+"?t="+Date.now()},5000)})();
@@ -447,26 +653,21 @@ if (fs.existsSync(pluginSrc)) {
   if (fs.existsSync(eslintConfigPath)) {
     let eslintConfig = fs.readFileSync(eslintConfigPath, "utf-8");
     if (!eslintConfig.includes("designsync")) {
-      // Plugin file uses module.exports (CJS), so always save as .cjs
       const pluginFileDest = path.join(projectRoot, "designsync-eslint.cjs");
       fs.copyFileSync(pluginSrc, pluginFileDest);
 
-      // Check if project uses "type": "module" (ESM)
       const projPkg = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf-8"));
       const isESM = projPkg.type === "module";
 
-      // ESM: createRequire needed for .cjs, CJS: direct require works
       const importLine = isESM
         ? `import { createRequire } from "module";\nconst __require = createRequire(import.meta.url);\nconst designsync = __require("./designsync-eslint.cjs");\n`
         : `const designsync = require("./designsync-eslint.cjs");\n`;
       const configBlock = `  designsync,\n`;
 
-      // Insert import after last import
       const lastImportIdx = eslintConfig.lastIndexOf("import ");
       const lineEnd = eslintConfig.indexOf("\n", lastImportIdx);
       eslintConfig = eslintConfig.slice(0, lineEnd + 1) + importLine + eslintConfig.slice(lineEnd + 1);
 
-      // Insert config block before last ]
       const closingBracket = eslintConfig.lastIndexOf("]");
       eslintConfig = eslintConfig.slice(0, closingBracket) + configBlock + eslintConfig.slice(closingBracket);
 
@@ -483,40 +684,77 @@ if (fs.existsSync(pluginSrc)) {
 }
 
 // ── 6. Migrate existing code to DesignSync tokens ────────────────────
+
+// ── 6a. Tailwind class token migration ───────────────────────────────
 const CLASS_MAP = {
-  'bg-white':           'bg-background',
-  'bg-gray-50':         'bg-background',
-  'bg-slate-50':        'bg-background',
-  'bg-[#fafafa]':       'bg-background',
-  'bg-[#fff]':          'bg-background',
-  'bg-gray-100':        'bg-muted',
-  'bg-slate-100':       'bg-muted',
-  'bg-gray-200':        'bg-muted',
-  'bg-blue-600':        'bg-primary',
-  'bg-indigo-600':      'bg-primary',
-  'bg-red-600':         'bg-destructive',
-  'bg-red-500':         'bg-destructive',
-  'bg-blue-50':         'bg-accent',
-  'bg-indigo-50':       'bg-accent',
-  'text-gray-900':      'text-foreground',
-  'text-gray-800':      'text-foreground',
-  'text-black':         'text-foreground',
-  'text-gray-600':      'text-muted-foreground',
-  'text-gray-500':      'text-muted-foreground',
-  'text-gray-400':      'text-muted-foreground',
-  'text-white':         'text-primary-foreground',
-  'text-blue-600':      'text-primary',
-  'text-red-600':       'text-destructive',
-  'border-gray-200':    'border-border',
-  'border-gray-100':    'border-border',
-  'border-[#e5e5e5]':   'border-border',
-  'border-gray-300':    'border-input',
-  'border-[#ddd]':      'border-input',
-  'hover:bg-gray-50':   'hover:bg-accent',
-  'hover:bg-gray-100':  'hover:bg-accent',
+  // Color – background
+  'bg-white':                   'bg-background',
+  'bg-gray-50':                 'bg-background',
+  'bg-slate-50':                'bg-background',
+  'bg-[#fafafa]':               'bg-background',
+  'bg-[#fff]':                  'bg-background',
+  'bg-gray-100':                'bg-muted',
+  'bg-slate-100':               'bg-muted',
+  'bg-gray-200':                'bg-muted',
+  'bg-blue-600':                'bg-primary',
+  'bg-indigo-600':              'bg-primary',
+  'bg-red-600':                 'bg-destructive',
+  'bg-red-500':                 'bg-destructive',
+  'bg-blue-50':                 'bg-accent',
+  'bg-indigo-50':               'bg-accent',
+
+  // Color – text
+  'text-gray-900':              'text-foreground',
+  'text-gray-800':              'text-foreground',
+  'text-black':                 'text-foreground',
+  'text-gray-600':              'text-muted-foreground',
+  'text-gray-500':              'text-muted-foreground',
+  'text-gray-400':              'text-muted-foreground',
+  'text-white':                 'text-primary-foreground',
+  'text-blue-600':              'text-primary',
+  'text-red-600':               'text-destructive',
+
+  // Color – border
+  'border-gray-200':            'border-border',
+  'border-gray-100':            'border-border',
+  'border-[#e5e5e5]':           'border-border',
+  'border-gray-300':            'border-input',
+  'border-[#ddd]':              'border-input',
+
+  // Color – hover
+  'hover:bg-gray-50':           'hover:bg-accent',
+  'hover:bg-gray-100':          'hover:bg-accent',
+
+  // Height tokens
+  'h-8':                        'h-[var(--ds-button-h-sm)]',
+  'h-9':                        'h-[var(--ds-button-h-default)]',
+  'h-10':                       'h-[var(--ds-button-h-default)]',
+  'h-12':                       'h-[var(--ds-button-h-lg)]',
+
+  // Border radius tokens
+  'rounded-md':                 'rounded-[var(--ds-element-radius)]',
+  'rounded-lg':                 'rounded-[var(--ds-card-radius)]',
+  'rounded-xl':                 'rounded-[var(--ds-card-radius)]',
+  'rounded-2xl':                'rounded-[var(--ds-dialog-radius)]',
+
+  // Padding tokens
+  'p-4':                        'p-[var(--ds-card-padding)]',
+  'p-5':                        'p-[var(--ds-card-padding)]',
+  'p-6':                        'p-[var(--ds-card-padding)]',
+  'px-4':                       'px-[var(--ds-card-padding)]',
+  'py-4':                       'py-[var(--ds-card-padding)]',
+
+  // Gap tokens
+  'gap-4':                      'gap-[var(--ds-section-gap)]',
+  'gap-6':                      'gap-[var(--ds-section-gap)]',
+  'gap-8':                      'gap-[var(--ds-section-gap)]',
+
+  // Focus ring tokens
+  'focus-visible:ring-2':       'focus-visible:ring-[var(--ds-focus-ring-width)]',
+  'ring-2':                     'ring-[var(--ds-focus-ring-width)]',
 };
 
-function migrateFile(filePath) {
+function migrateClassTokens(filePath) {
   let content = fs.readFileSync(filePath, "utf-8");
   let changed = false;
   for (const [from, to] of Object.entries(CLASS_MAP)) {
@@ -529,26 +767,202 @@ function migrateFile(filePath) {
   return changed;
 }
 
-try {
-  const srcDir = fs.existsSync(path.join(projectRoot, "src"))
-    ? path.join(projectRoot, "src")
-    : projectRoot;
-  const exts = [".tsx", ".ts", ".jsx", ".js"];
-  let migratedCount = 0;
+// ── 6b. HTML element → DesignSync component migration ────────────────
 
-  function walkAndMigrate(dir) {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name === "node_modules" || entry.name === ".next" || entry.name === "dist") continue;
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) { walkAndMigrate(full); }
-      else if (exts.includes(path.extname(entry.name))) {
-        if (migrateFile(full)) migratedCount++;
-      }
+// Elements to migrate: { tag, component, importPath }
+// We skip input/select/textarea (too risky without knowing type/usage).
+const ELEMENT_MAP = [
+  { tag: "button",  component: "Button",        importPath: "@/components/ui/button" },
+  { tag: "h1",      component: "TypographyH1",  importPath: "@/components/ui/typography" },
+  { tag: "h2",      component: "TypographyH2",  importPath: "@/components/ui/typography" },
+  { tag: "h3",      component: "TypographyH3",  importPath: "@/components/ui/typography" },
+  { tag: "h4",      component: "TypographyH4",  importPath: "@/components/ui/typography" },
+];
+
+// Group Typography components so we emit a single import statement
+const TYPOGRAPHY_COMPONENTS = ["TypographyH1", "TypographyH2", "TypographyH3", "TypographyH4"];
+
+/**
+ * Insert an import statement into a file's source, after the last existing import.
+ * Handles "use client" / "use server" directives at the top.
+ * Returns the modified content.
+ */
+function injectImport(content, importStatement) {
+  // Find the index of the last import line
+  const lines = content.split("\n");
+  let lastImportLine = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*import\s/.test(lines[i])) lastImportLine = i;
+  }
+
+  if (lastImportLine >= 0) {
+    lines.splice(lastImportLine + 1, 0, importStatement);
+    return lines.join("\n");
+  }
+
+  // No imports found — insert after "use client"/"use server" directive if present
+  const directiveMatch = content.match(/^["']use (client|server)["'];?\s*\n/);
+  if (directiveMatch) {
+    const insertAt = directiveMatch[0].length;
+    return content.slice(0, insertAt) + importStatement + "\n" + content.slice(insertAt);
+  }
+
+  // Prepend at top
+  return importStatement + "\n" + content;
+}
+
+/**
+ * Check whether a given import name is already imported from a given path.
+ * e.g. already has `import { Button } from "@/components/ui/button"`
+ */
+function isAlreadyImported(content, name, importPath) {
+  // Match both named imports from that path
+  const re = new RegExp(`import\\s*\\{[^}]*\\b${name}\\b[^}]*\\}\\s*from\\s*["']${importPath.replace(/\//g, "\\/")}["']`);
+  return re.test(content);
+}
+
+/**
+ * Replace raw HTML element tags with DesignSync component names in JSX.
+ * Skips replacements inside JS comments (// and block comments).
+ * Returns { content, changed }.
+ */
+function replaceElementTags(content, tag, component) {
+  // Opening tag: <button  →  <Button  (only JSX, i.e. followed by space, / or >)
+  // Closing tag: </button>  →  </Button>
+  // We use a naive but effective approach: replace outside of comment blocks.
+  // Strip comments temporarily is error-prone; instead use word-boundary regex
+  // and only match when preceded by < or </ and followed by \s, > or />.
+
+  const openRe  = new RegExp(`<${tag}(\\s|>|/)`, "g");
+  const closeRe = new RegExp(`<\\/${tag}>`, "g");
+
+  let changed = false;
+
+  const next1 = content.replace(openRe, (m, after) => {
+    changed = true;
+    return `<${component}${after}`;
+  });
+
+  const next2 = next1.replace(closeRe, () => {
+    changed = true;
+    return `</${component}>`;
+  });
+
+  return { content: next2, changed };
+}
+
+function migrateElements(filePath) {
+  // Skip DesignSync component files themselves (components/ui/)
+  if (filePath.includes(path.sep + "components" + path.sep + "ui" + path.sep)) return false;
+
+  let content;
+  try {
+    content = fs.readFileSync(filePath, "utf-8");
+  } catch {
+    return false;
+  }
+
+  // Only process JSX/TSX files — plain .ts/.js rarely have JSX elements
+  const ext = path.extname(filePath);
+  if (ext !== ".tsx" && ext !== ".jsx") return false;
+
+  let fileChanged = false;
+  const neededImports = new Map(); // importPath → Set<componentName>
+
+  for (const { tag, component, importPath } of ELEMENT_MAP) {
+    const { content: next, changed } = replaceElementTags(content, tag, component);
+    if (changed) {
+      content = next;
+      fileChanged = true;
+      if (!neededImports.has(importPath)) neededImports.set(importPath, new Set());
+      neededImports.get(importPath).add(component);
     }
   }
 
-  walkAndMigrate(srcDir);
-  console.log(`  [6/6] Migrated ${migratedCount} files to DesignSync tokens`);
+  if (!fileChanged) return false;
+
+  // Inject missing imports
+  for (const [importPath, components] of neededImports.entries()) {
+    // For Typography: group all typography components into one import
+    const toImport = [...components].filter((c) => !isAlreadyImported(content, c, importPath));
+    if (toImport.length === 0) continue;
+
+    // Check whether there's already a partial import from this path we should extend
+    const existingImportRe = new RegExp(
+      `(import\\s*\\{)([^}]*)(\\}\\s*from\\s*["']${importPath.replace(/\//g, "\\/")}["'])`,
+      "g"
+    );
+    const existingMatch = existingImportRe.exec(content);
+    if (existingMatch) {
+      // Extend existing import
+      const alreadyThere = existingMatch[2].split(",").map((s) => s.trim()).filter(Boolean);
+      const merged = [...new Set([...alreadyThere, ...toImport])];
+      content = content.replace(existingImportRe, `${existingMatch[1]} ${merged.join(", ")} ${existingMatch[3]}`);
+    } else {
+      const stmt = `import { ${toImport.join(", ")} } from "${importPath}";`;
+      content = injectImport(content, stmt);
+    }
+  }
+
+  try {
+    fs.writeFileSync(filePath, content);
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+// ── Run 6a + 6b across all src files ─────────────────────────────────
+try {
+  const srcDir = useSrc ? path.join(projectRoot, "src") : projectRoot;
+  const exts = [".tsx", ".ts", ".jsx", ".js"];
+  let classTokenMigrated = 0;
+  let elementMigrated = 0;
+
+  const elementCounters = {};
+  for (const { tag, component } of ELEMENT_MAP) {
+    elementCounters[tag] = 0;
+  }
+
+  const allFiles = walkSrcFiles(srcDir, exts);
+
+  for (const filePath of allFiles) {
+    try {
+      if (migrateClassTokens(filePath)) classTokenMigrated++;
+    } catch {}
+
+    try {
+      // Track per-element counts for logging
+      const ext = path.extname(filePath);
+      if (ext === ".tsx" || ext === ".jsx") {
+        // Skip components/ui/
+        if (!filePath.includes(path.sep + "components" + path.sep + "ui" + path.sep)) {
+          let content = fs.readFileSync(filePath, "utf-8");
+          let anyChanged = false;
+          for (const { tag } of ELEMENT_MAP) {
+            const openRe = new RegExp(`<${tag}(\\s|>|/)`, "g");
+            if (openRe.test(content)) elementCounters[tag]++;
+          }
+          if (migrateElements(filePath)) {
+            elementMigrated++;
+            anyChanged = true;
+          }
+        }
+      }
+    } catch {}
+  }
+
+  const elementSummary = ELEMENT_MAP
+    .filter(({ tag }) => elementCounters[tag] > 0)
+    .map(({ tag, component }) => `${tag}→${component}`)
+    .join(", ");
+
+  console.log(`  [6/6] Class tokens: ${classTokenMigrated} files migrated`);
+  if (elementMigrated > 0) {
+    console.log(`  [6/6] Elements: ${elementMigrated} files migrated (${elementSummary || "none"})`);
+  } else {
+    console.log(`  [6/6] Elements: no raw HTML elements found to migrate`);
+  }
 } catch (e) {
   console.log(`  [6/6] Migration skipped: ${e.message}`);
 }
@@ -577,7 +991,7 @@ try {
   }
 } catch {}
 
-console.log("  [6/6] Done!");
+console.log("  [done] DesignSync setup complete!");
 console.log("");
 
 if (!dsSlug) {
