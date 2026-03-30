@@ -138,11 +138,22 @@ async function migrate(content, filename) {
   return raw.replace(/^```(?:tsx?|jsx?)?\n?/, "").replace(/\n?```\s*$/, "");
 }
 
-function hasViolations(filePath) {
+function getViolations(filePath) {
   try {
-    execSync(`npx eslint "${filePath}" --quiet`, { stdio: ["pipe", "pipe", "pipe"] });
-    return false;
-  } catch { return true; }
+    const out = execSync(`npx eslint "${filePath}" --format json`, { stdio: ["pipe", "pipe", "pipe"] });
+    const results = JSON.parse(out.toString());
+    return results[0]?.messages || [];
+  } catch (e) {
+    try {
+      const out = e.stdout?.toString() || "";
+      const results = JSON.parse(out);
+      return results[0]?.messages || [];
+    } catch { return [{ message: "ESLint error" }]; }
+  }
+}
+
+function hasViolations(filePath) {
+  return getViolations(filePath).length > 0;
 }
 
 function findFiles(dir, result = []) {
@@ -182,10 +193,47 @@ let done = 0, failed = 0;
 for (const filePath of toMigrate) {
   process.stdout.write(`   ${filePath} ...`);
   try {
-    const content = readFileSync(filePath, "utf-8");
-    const migrated = await migrate(content, basename(filePath));
+    let content = readFileSync(filePath, "utf-8");
+    let migrated = await migrate(content, basename(filePath));
     writeFileSync(filePath, migrated);
-    process.stdout.write(" ✅\n");
+
+    // 재시도 루프: 위반 남아있으면 AI에게 위반 목록 포함해서 재요청 (최대 3회)
+    let attempts = 1;
+    while (attempts < 3) {
+      const violations = getViolations(filePath);
+      if (violations.length === 0) break;
+
+      // ESLint --fix로 자동 수정 가능한 것 먼저 처리
+      try { execSync(`npx eslint "${filePath}" --fix --quiet`, { stdio: "pipe" }); } catch {}
+
+      const remaining = getViolations(filePath);
+      if (remaining.length === 0) break;
+
+      // 남은 위반을 AI에게 알려주고 재요청
+      const violationSummary = remaining.slice(0, 10).map(v => `Line ${v.line}: ${v.message}`).join("\n");
+      const retryContent = readFileSync(filePath, "utf-8");
+      const retryPrompt = `The following ESLint violations remain after migration. Fix them:\n\n${violationSummary}\n\nFile:\n\n${retryContent}`;
+
+      const raw = ANTHROPIC_KEY
+        ? await migrateViaAnthropic(retryContent, basename(filePath) + ` [retry ${attempts}, violations: ${violationSummary}]`)
+        : OPENAI_KEY
+        ? await migrateViaOpenAI(retryContent, basename(filePath) + ` [retry ${attempts}]`)
+        : await migrateViaServer(retryContent, basename(filePath));
+
+      migrated = raw.replace(/^```(?:tsx?|jsx?)?\n?/, "").replace(/\n?```\s*$/, "");
+      writeFileSync(filePath, migrated);
+      attempts++;
+    }
+
+    // 최종 ESLint --fix 한 번 더
+    try { execSync(`npx eslint "${filePath}" --fix --quiet`, { stdio: "pipe" }); } catch {}
+
+    const finalViolations = getViolations(filePath);
+    if (finalViolations.length === 0) {
+      process.stdout.write(" ✅\n");
+    } else {
+      process.stdout.write(` ⚠️  (${finalViolations.length}개 위반 잔존)\n`);
+    }
     done++;
   } catch (err) {
     process.stdout.write(` ❌ (${err.message})\n`);
