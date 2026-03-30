@@ -1259,7 +1259,7 @@ if (process.env.DESIGNSYNC_MIGRATE === "true") {
     }
   } else {
     console.log("  [migrate] 소스 디렉토리를 찾지 못했습니다. 수동으로 실행하세요:");
-    console.log("  node node_modules/designsync-ui/designsync-migrate.mjs src");
+    console.log("  node node_modules/@ilyeolee/designsync-ui/designsync-migrate.mjs src");
     console.log("");
   }
 }
