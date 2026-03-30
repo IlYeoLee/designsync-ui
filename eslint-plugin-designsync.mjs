@@ -393,55 +393,61 @@ const noRawHtmlElements = {
         const body = programNode.body;
         const importDecls = body.filter((n) => n.type === "ImportDeclaration");
 
+        // Split into: patch existing imports vs. add new import lines
+        const appendFixes = []; // { existing, addStr }
+        const newLines = [];    // full import statement strings
+
         for (const [importPath, components] of neededImports) {
           const existing = importDecls.find((d) => d.source.value === importPath);
-
           if (existing) {
-            // Find which components are already imported
             const existingNames = new Set(
               existing.specifiers
                 .filter((s) => s.type === "ImportSpecifier")
                 .map((s) => s.imported.name)
             );
             const missing = [...components].filter((c) => !existingNames.has(c));
-            if (missing.length === 0) continue;
-
-            // Append missing specifiers to existing import
-            const lastSpecifier = existing.specifiers[existing.specifiers.length - 1];
-            const addStr = `, ${missing.join(", ")}`;
-            context.report({
-              node: existing,
-              messageId: "addImport",
-              data: { importStatement: addStr },
-              fix(fixer) {
-                return fixer.insertTextAfter(lastSpecifier, addStr);
-              },
-            });
+            if (missing.length > 0) {
+              appendFixes.push({ existing, addStr: `, ${missing.join(", ")}` });
+            }
           } else {
-            // Insert new import after last existing import (or at top, after directives)
-            const importStr = `import { ${[...components].join(", ")} } from "${importPath}";\n`;
-            const insertAfter = importDecls.length > 0
-              ? importDecls[importDecls.length - 1]
-              : null;
-
-            context.report({
-              node: programNode,
-              messageId: "addImport",
-              data: { importStatement: importStr.trim() },
-              fix(fixer) {
-                if (insertAfter) {
-                  return fixer.insertTextAfter(insertAfter, `\n${importStr}`);
-                }
-                // No existing imports — insert before first non-directive statement
-                const firstStmt = body.find(
-                  (n) => !(n.type === "ExpressionStatement" && n.directive)
-                );
-                return firstStmt
-                  ? fixer.insertTextBefore(firstStmt, importStr)
-                  : fixer.insertTextBefore(body[0], importStr);
-              },
-            });
+            newLines.push(`import { ${[...components].join(", ")} } from "${importPath}";`);
           }
+        }
+
+        // Patch existing imports (separate ranges — no conflict)
+        for (const { existing, addStr } of appendFixes) {
+          const lastSpecifier = existing.specifiers[existing.specifiers.length - 1];
+          context.report({
+            node: existing,
+            messageId: "addImport",
+            data: { importStatement: addStr },
+            fix: (fixer) => fixer.insertTextAfter(lastSpecifier, addStr),
+          });
+        }
+
+        // Insert ALL new imports as ONE fix to avoid position conflicts
+        if (newLines.length > 0) {
+          const insertStr = newLines.join("\n") + "\n";
+          const insertAfter = importDecls.length > 0
+            ? importDecls[importDecls.length - 1]
+            : null;
+
+          context.report({
+            node: programNode,
+            messageId: "addImport",
+            data: { importStatement: insertStr.trim() },
+            fix(fixer) {
+              if (insertAfter) {
+                return fixer.insertTextAfter(insertAfter, "\n" + insertStr);
+              }
+              const firstStmt = body.find(
+                (n) => !(n.type === "ExpressionStatement" && n.directive)
+              );
+              return firstStmt
+                ? fixer.insertTextBefore(firstStmt, insertStr)
+                : fixer.insertTextBefore(body[0], insertStr);
+            },
+          });
         }
       },
     };
@@ -627,7 +633,7 @@ const plugin = {
 
 // ─── Flat Config Export ─────────────────────────────────────────────────────
 
-module.exports = {
+export default {
   files: ["**/*.{jsx,tsx}"],
   plugins: {
     designsync: plugin,
