@@ -755,9 +755,10 @@ function isIgnored(filePath, patterns) {
 // ── Backup system ─────────────────────────────────────────────────────
 function backupFile(filePath) {
   if (DRY_RUN) return;
-  mkdirSync(BACKUP_DIR, { recursive: true });
-  const rel = relative(projectRoot, filePath).replace(/\\/g, "_");
+  const rel = relative(projectRoot, filePath);
   const dest = join(BACKUP_DIR, rel);
+  // Create subdirectory structure inside backup dir
+  mkdirSync(dirname(dest), { recursive: true });
   // Only backup once (don't overwrite original with already-migrated content)
   if (!existsSync(dest)) copyFileSync(filePath, dest);
 }
