@@ -834,23 +834,6 @@ function isAlreadyImported(content, name, importPath) {
   return re.test(content);
 }
 
-/**
- * Pre-process: replace <input type="checkbox" .../> with <Checkbox .../>
- * Must run BEFORE the generic <input>→<Input> pass.
- * Returns { content, changed }.
- */
-function replaceCheckboxInputs(content) {
-  // Matches <input type="checkbox" .../> (self-closing) AND <input type="checkbox" ...> (non-self-closing)
-  // type="checkbox" may appear anywhere among the attributes (order-independent).
-  const re = /<input\b([^>]*)\btype=["']checkbox["']([^>]*?)(\s*\/?>)/g;
-  let changed = false;
-  const next = content.replace(re, (_match, before, after) => {
-    changed = true;
-    const attrs = (before + after).trim().replace(/\s+/g, " ");
-    return attrs ? `<Checkbox ${attrs}/>` : `<Checkbox />`;
-  });
-  return { content: next, changed };
-}
 
 /**
  * Replace raw HTML element tags with DesignSync component names in JSX.
@@ -900,17 +883,9 @@ function migrateElements(filePath) {
   let fileChanged = false;
   const neededImports = new Map(); // importPath → Set<componentName>
 
-  // Special pass: <input type="checkbox" .../> → <Checkbox .../> (must come before input→Input)
-  {
-    const { content: next, changed } = replaceCheckboxInputs(content);
-    if (changed) {
-      content = next;
-      fileChanged = true;
-      const cbPath = "@/components/ui/checkbox";
-      if (!neededImports.has(cbPath)) neededImports.set(cbPath, new Set());
-      neededImports.get(cbPath).add("Checkbox");
-    }
-  }
+  // NOTE: <input type="checkbox"> is intentionally left as <Input type="checkbox">.
+  // Checkbox (Radix) uses onCheckedChange instead of onChange — API mismatch too risky to auto-fix.
+  // ESLint will flag <Input type="checkbox"> and guide manual migration to <Checkbox>.
 
   for (const { tag, component, importPath } of ELEMENT_MAP) {
     const { content: next, changed } = replaceElementTags(content, tag, component);
@@ -962,7 +937,7 @@ try {
   let classTokenMigrated = 0;
   let elementMigrated = 0;
 
-  const elementCounters = { "input[checkbox]": 0 };
+  const elementCounters = {};
   for (const { tag } of ELEMENT_MAP) {
     elementCounters[tag] = 0;
   }
@@ -981,14 +956,9 @@ try {
         // Skip components/ui/
         if (!filePath.includes(path.sep + "components" + path.sep + "ui" + path.sep)) {
           let content = fs.readFileSync(filePath, "utf-8");
-          // Count checkbox inputs separately (matches both self-closing and non-self-closing)
-          if (/<input\b[^>]*\btype=["']checkbox["'][^>]*\/?>/g.test(content)) elementCounters["input[checkbox]"]++;
-          // Strip checkbox inputs before counting generic <input> to avoid double-counting
-          const contentForCounting = content.replace(/<input\b[^>]*\btype=["']checkbox["'][^>]*\/?>/g, "");
           for (const { tag } of ELEMENT_MAP) {
             const openRe = new RegExp(`<${tag}(\\s|>|/)`, "g");
-            const src = tag === "input" ? contentForCounting : content;
-            if (openRe.test(src)) elementCounters[tag]++;
+            if (openRe.test(content)) elementCounters[tag]++;
           }
           if (migrateElements(filePath)) {
             elementMigrated++;
@@ -999,13 +969,10 @@ try {
     } catch {}
   }
 
-  const checkboxSummary = elementCounters["input[checkbox]"] > 0 ? ["input[checkbox]→Checkbox"] : [];
-  const elementSummary = [
-    ...checkboxSummary,
-    ...ELEMENT_MAP
-      .filter(({ tag }) => elementCounters[tag] > 0)
-      .map(({ tag, component }) => `${tag}→${component}`),
-  ].join(", ");
+  const elementSummary = ELEMENT_MAP
+    .filter(({ tag }) => elementCounters[tag] > 0)
+    .map(({ tag, component }) => `${tag}→${component}`)
+    .join(", ");
 
   console.log(`  [6/6] Class tokens: ${classTokenMigrated} files migrated`);
   if (elementMigrated > 0) {
