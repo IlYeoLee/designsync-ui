@@ -149,6 +149,65 @@ function fetchText(url) {
   });
 }
 
+function fetchBinary(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return fetchBinary(res.headers.location).then(resolve, reject);
+      }
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => resolve(Buffer.concat(chunks)));
+    }).on("error", reject);
+  });
+}
+
+// Download all @font-face src URLs to public/fonts/, rewrite CSS to use local paths
+async function localizefonts(css, projectRoot) {
+  const publicFontsDir = path.join(projectRoot, "public", "fonts");
+  fs.mkdirSync(publicFontsDir, { recursive: true });
+
+  // Match url("...") inside @font-face blocks
+  const fontFaceRegex = /@font-face\s*\{[^}]*\}/g;
+  const urlRegex = /url\(['"]?(https?:\/\/[^'")\s]+)['"]?\)/g;
+
+  let fontsDownloaded = 0;
+  const processedCss = css.replace(fontFaceRegex, (fontFaceBlock) => {
+    return fontFaceBlock.replace(urlRegex, (match, url) => {
+      // Skip Google Fonts CDN — they need @import, not direct file download
+      if (url.includes("fonts.gstatic.com") || url.includes("fonts.googleapis.com")) return match;
+      const filename = path.basename(url.split("?")[0]);
+      const localPath = path.join(publicFontsDir, filename);
+      if (!fs.existsSync(localPath)) {
+        try {
+          const buf = fetchBinary(url);
+          // Schedule async download (fire-and-forget — we write sync placeholder)
+          buf.then((b) => { fs.writeFileSync(localPath, b); fontsDownloaded++; }).catch(() => {});
+        } catch {}
+      }
+      return `url('/fonts/${filename}')`;
+    });
+  });
+
+  // Actually await all downloads properly
+  const downloadQueue = [];
+  css.replace(fontFaceRegex, (fontFaceBlock) => {
+    fontFaceBlock.replace(urlRegex, (_, url) => {
+      if (url.includes("fonts.gstatic.com") || url.includes("fonts.googleapis.com")) return;
+      const filename = path.basename(url.split("?")[0]);
+      const localPath = path.join(publicFontsDir, filename);
+      if (!fs.existsSync(localPath)) {
+        downloadQueue.push(
+          fetchBinary(url).then((buf) => { fs.writeFileSync(localPath, buf); fontsDownloaded++; }).catch(() => {})
+        );
+      }
+    });
+  });
+  await Promise.all(downloadQueue);
+
+  return { css: processedCss, fontsDownloaded };
+}
+
 // Walk all source files, skipping build/vendor dirs
 function walkSrcFiles(dir, exts, skipDirs = []) {
   const results = [];
@@ -661,62 +720,56 @@ const themeInlineBlock = `
 
 const cssFile = findCssFile(projectRoot);
 if (cssFile && dsSlug) {
-  const liveUrl = `${CDN}/r/${dsSlug}/designsync-tokens.css`;
+  const tokenUrl = `${CDN}/r/${dsSlug}/designsync-tokens.css`;
   let cssContent = fs.readFileSync(cssFile, "utf-8");
 
-  // Remove @import url(...) and all blank lines immediately following it
+  // Remove previous designsync injections
   cssContent = cssContent.replace(/^@import\s+url\(["'][^"']*designsync-tokens\.css["']\)[^;\n]*;?[ \t]*\n([ \t]*\n)*/m, "");
-  // Remove theme block and all blank lines immediately following it
   cssContent = cssContent.replace(/\/\* designsync-theme-start \*\/[\s\S]*?\/\* designsync-theme-end \*\/[ \t]*\n([ \t]*\n)*/m, "");
 
-  // @import url() MUST come before any non-import CSS rules (CSS spec).
-  // Tailwind v4 expands @import "tailwindcss" into utility classes at build time,
-  // so anything placed after it is treated as post-rules and browsers would ignore @import.
-  // Solution: put liveImport at the very top, themeBlock right after @import "tailwindcss".
-  const liveImport = `@import url("${liveUrl}");\n`;
-  const themeBlock = `/* designsync-theme-start */\n${themeInlineBlock}\n/* designsync-theme-end */`;
+  try {
+    // Fetch token CSS at install time — no runtime server dependency
+    let tokenCss = await fetchText(tokenUrl);
 
-  // Use [ \t]* (not \s*) so we only capture the line, not following blank lines
-  const tailwindV4Regex = /(@import\s+["']tailwindcss["'];?[ \t]*\n?)/;
-  const tailwindV3Regex = /(@tailwind\s+base;?[ \t]*\n?)/;
+    // Download fonts locally → rewrite to /fonts/filename
+    const { css: localizedCss, fontsDownloaded } = await localizefonts(tokenCss, projectRoot);
+    tokenCss = localizedCss;
 
-  if (tailwindV4Regex.test(cssContent)) {
-    // Tailwind v4: inject liveImport before, themeBlock after
-    cssContent = cssContent.replace(tailwindV4Regex, `${liveImport}\n$1\n${themeBlock}\n\n`);
-  } else if (tailwindV3Regex.test(cssContent)) {
-    // Tailwind v3: only inject liveImport before @tailwind base (no @theme inline)
-    cssContent = cssContent.replace(tailwindV3Regex, `${liveImport}\n$1`);
-  } else {
-    // No tailwind: prepend liveImport + themeBlock
-    cssContent = liveImport + "\n" + themeBlock + "\n\n" + cssContent;
-  }
-  fs.writeFileSync(cssFile, cssContent);
+    // Separate out @import lines (Google Fonts etc.) — must stay at top per CSS spec
+    const importLines = [];
+    const tokenBody = tokenCss.replace(/^@import\s+url\([^)]+\);?[ \t]*\n?/gm, (m) => {
+      importLines.push(m.trim());
+      return "";
+    }).trim();
 
-  const htmlCandidates = ["index.html", "public/index.html", "src/index.html"];
-  const linkTag = `<link rel="stylesheet" href="${liveUrl}" />`;
-  for (const htmlPath of htmlCandidates) {
-    const fullPath = path.join(projectRoot, htmlPath);
-    if (fs.existsSync(fullPath)) {
-      let html = fs.readFileSync(fullPath, "utf-8");
-      if (!html.includes("designsync-tokens.css")) {
-        html = html.replace("</head>", `    ${linkTag}\n  </head>`);
-      }
-      if (!html.includes("designsync-live-reload")) {
-        const liveScript = `<script data-designsync-live-reload>
-    (function(){var l=document.querySelector('link[href*="designsync-tokens"]');if(l)setInterval(function(){l.href=l.href.split("?")[0]+"?t="+Date.now()},5000)})();
-    </script>`;
-        html = html.replace("</body>", `    ${liveScript}\n  </body>`);
-      }
-      fs.writeFileSync(fullPath, html);
-      break;
+    const themeBlock = [
+      "/* designsync-theme-start */",
+      ...importLines,
+      tokenBody,
+      `${themeInlineBlock}`,
+      "/* designsync-theme-end */",
+    ].join("\n");
+
+    const tailwindV4Regex = /(@import\s+["']tailwindcss["'];?[ \t]*\n?)/;
+    const tailwindV3Regex = /(@tailwind\s+base;?[ \t]*\n?)/;
+
+    if (tailwindV4Regex.test(cssContent)) {
+      cssContent = cssContent.replace(tailwindV4Regex, `$1\n${themeBlock}\n\n`);
+    } else if (tailwindV3Regex.test(cssContent)) {
+      cssContent = cssContent.replace(tailwindV3Regex, `${themeBlock}\n\n$1`);
+    } else {
+      cssContent = themeBlock + "\n\n" + cssContent;
     }
-  }
 
-  console.log("  [3/6] Live token sync + theme enabled");
+    fs.writeFileSync(cssFile, cssContent);
+    console.log(`  [3/6] Tokens inlined (${fontsDownloaded} fonts downloaded to public/fonts/)`);
+  } catch (e) {
+    console.log(`  [3/6] Token fetch failed (${e.message}) — skipping`);
+  }
 } else if (cssFile) {
-  console.log("  [3/6] Skipped live sync (set DESIGNSYNC_SLUG env or create .designsync.json)");
+  console.log("  [3/6] Skipped (set DESIGNSYNC_SLUG env or create .designsync.json)");
 } else {
-  console.log("  [3/6] Skipped live sync (CSS file not found)");
+  console.log("  [3/6] Skipped (CSS file not found)");
 }
 
 // ── 4. Fetch and write AI rules (.cursorrules, CLAUDE.md) ────────────
