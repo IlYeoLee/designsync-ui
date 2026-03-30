@@ -793,9 +793,7 @@ const ELEMENT_MAP = [
   { tag: "h4",       component: "TypographyH4",  importPath: "@/components/ui/typography" },
 ];
 
-// Component groups that share a single import statement
-const TYPOGRAPHY_COMPONENTS = ["TypographyH1", "TypographyH2", "TypographyH3", "TypographyH4"];
-const TABLE_COMPONENTS = ["Table", "TableHeader", "TableBody", "TableFooter", "TableRow", "TableHead", "TableCell"];
+// (import grouping for shared-path components is handled automatically via neededImports Map)
 
 /**
  * Insert an import statement into a file's source, after the last existing import.
@@ -842,9 +840,9 @@ function isAlreadyImported(content, name, importPath) {
  * Returns { content, changed }.
  */
 function replaceCheckboxInputs(content) {
-  // Matches self-closing inputs where type="checkbox" or type='checkbox' (order-independent)
-  // Captures all attributes so they are preserved on the Checkbox component.
-  const re = /<input\b([^>]*)\btype=["']checkbox["']([^>]*)\/>/g;
+  // Matches <input type="checkbox" .../> (self-closing) AND <input type="checkbox" ...> (non-self-closing)
+  // type="checkbox" may appear anywhere among the attributes (order-independent).
+  const re = /<input\b([^>]*)\btype=["']checkbox["']([^>]*?)(\s*\/?>)/g;
   let changed = false;
   const next = content.replace(re, (_match, before, after) => {
     changed = true;
@@ -933,9 +931,9 @@ function migrateElements(filePath) {
     if (toImport.length === 0) continue;
 
     // Check whether there's already a partial import from this path we should extend
+    // No "g" flag — we use it for both exec() and replace() on the same string
     const existingImportRe = new RegExp(
-      `(import\\s*\\{)([^}]*)(\\}\\s*from\\s*["']${importPath.replace(/\//g, "\\/")}["'])`,
-      "g"
+      `(import\\s*\\{)([^}]*)(\\}\\s*from\\s*["']${importPath.replace(/\//g, "\\/")}["'])`
     );
     const existingMatch = existingImportRe.exec(content);
     if (existingMatch) {
