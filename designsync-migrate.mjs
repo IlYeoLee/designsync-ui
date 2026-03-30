@@ -43,6 +43,24 @@ CRITICAL RULES:
 - Return ONLY the complete migrated file content. No explanation. No markdown fences.
 - ALWAYS specify Button variant — NEVER leave it unset (default=primary pill, usually wrong):
 
+BUTTON VARIANT — DETERMINE BY VISUAL ROLE (not by tag):
+  - <button> wrapping display text/heading/title → variant="ghost" className="h-auto px-0 hover:bg-transparent"
+  - <button> that IS a form submit / primary CTA → variant="default"
+  - <button> with border, no fill → variant="outline"
+  - <button> in nav/sidebar/toolbar/icon → variant="ghost" (or size="icon")
+  - <button variant="destructive"> only for delete/dangerous actions
+  - WHEN IN DOUBT → variant="ghost"
+
+TABS VARIANT — ONLY THESE TWO VALUES ARE VALID:
+  - Border-bottom underline tabs → variant="underline"  (NOT "line", NOT "border")
+  - Pill/segment tabs → variant="pill"
+  - NEVER use variant="line", variant="default", or any other string
+
+COMPONENT PROP SAFETY:
+  - Before using any prop/variant value, confirm it exists in the component definition
+  - If unsure of accepted values → use the most basic/default option or skip the prop entirely
+  - NEVER invent prop values that aren't in the DS component API
+
 3-TIER MIGRATION STRATEGY:
 TIER 1 (full replacement): pattern exactly matches DS component → replace entirely
 TIER 2 (partial): similar but custom details → use DS component as wrapper + className overrides
@@ -492,7 +510,7 @@ ${fileList}`;
 
 // ── 4. Parallel 2x + vote ─────────────────────────────────────────────
 async function migrateWithVote(content, filename, screenshotB64) {
-  // Run two migrations in parallel, pick the one with fewer ESLint violations
+  // Run two migrations in parallel, pick the one with fewer ESLint + TypeScript errors
   const [r1, r2] = await Promise.allSettled([
     migrate(content, filename, screenshotB64),
     migrate(content, filename, screenshotB64),
@@ -504,12 +522,14 @@ async function migrateWithVote(content, filename, screenshotB64) {
   if (candidates.length === 1) return candidates[0];
 
   // Write to temp files, check violations, pick winner
-  const tmp1 = `/tmp/ds_vote_a_${Date.now()}.tsx`;
-  const tmp2 = `/tmp/ds_vote_b_${Date.now()}.tsx`;
+  const ts = Date.now();
+  const tmp1 = `/tmp/ds_vote_a_${ts}.tsx`;
+  const tmp2 = `/tmp/ds_vote_b_${ts}.tsx`;
   writeFileSync(tmp1, candidates[0]);
   writeFileSync(tmp2, candidates[1]);
-  const v1 = getViolations(tmp1).length;
-  const v2 = getViolations(tmp2).length;
+  // Score = ESLint violations + TypeScript errors (lower is better)
+  const v1 = getViolations(tmp1).length + getTsErrors(tmp1).length;
+  const v2 = getViolations(tmp2).length + getTsErrors(tmp2).length;
   try { execSync(`rm -f "${tmp1}" "${tmp2}"`); } catch {}
   return v1 <= v2 ? candidates[0] : candidates[1];
 }
@@ -971,20 +991,23 @@ async function processSingleFile(filePath, screenshotB64, useVote = false) {
 
   let attempts = 1;
   while (attempts < 3) {
+    // Check BOTH ESLint AND TypeScript errors
     const violations = getViolations(filePath);
-    if (violations.length === 0) break;
+    const tsErrors = getTsErrors(filePath);
+    if (violations.length === 0 && tsErrors.length === 0) break;
+
     try { execSync(`npx eslint "${filePath}" --fix --quiet`, { stdio: "pipe" }); } catch {}
     const remaining = getViolations(filePath);
-    if (remaining.length === 0) break;
+    const remainingTs = getTsErrors(filePath);
+    if (remaining.length === 0 && remainingTs.length === 0) break;
 
-    const tsErrors = getTsErrors(filePath);
     const violationSummary = [
       ...remaining.slice(0, 8).map(v => `ESLint Line ${v.line}: ${v.message}`),
-      ...tsErrors.slice(0, 4),
+      ...remainingTs.slice(0, 6).map(e => `TypeScript: ${e}`),
     ].join("\n");
 
     const retryContent = readFileSync(filePath, "utf-8");
-    const raw = await migrate(retryContent, `${basename(filePath)} [retry ${attempts}, fix:\n${violationSummary}]`, screenshotB64);
+    const raw = await migrate(retryContent, `${basename(filePath)} [retry ${attempts}, fix these errors:\n${violationSummary}]`, screenshotB64);
     writeFileSync(filePath, raw.replace(/^```(?:tsx?|jsx?)?\n?/, "").replace(/\n?```\s*$/, ""));
     attempts++;
   }
