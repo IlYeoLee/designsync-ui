@@ -723,8 +723,8 @@ if (cssFile && dsSlug) {
   const tokenUrl = `${CDN}/r/${dsSlug}/designsync-tokens.css`;
   let cssContent = fs.readFileSync(cssFile, "utf-8");
 
-  // Remove previous designsync injections
-  cssContent = cssContent.replace(/^@import\s+url\(["'][^"']*designsync-tokens\.css["']\)[^;\n]*;?[ \t]*\n([ \t]*\n)*/m, "");
+  // Remove previous designsync injections (anywhere in file)
+  cssContent = cssContent.replace(/@import\s+url\(["'][^"']*designsync[^"']*["']\)[^;\n]*;?[ \t]*\n?/gm, "");
   cssContent = cssContent.replace(/\/\* designsync-theme-start \*\/[\s\S]*?\/\* designsync-theme-end \*\/[ \t]*\n([ \t]*\n)*/m, "");
 
   try {
@@ -742,32 +742,37 @@ if (cssFile && dsSlug) {
       return "";
     }).trim();
 
-    // ── HYBRID: live @import (top) + inlined fallback (below) ──
-    // CSS cascade: @import from server wins when reachable (live sync).
-    // Inlined fallback kicks in when server is unreachable (any deployment).
+    // ── HYBRID: @import lines ALWAYS go to absolute top of file ──
+    // ── Fallback token body goes after tailwind import ────────────
+    // CSS spec: @import must appear before any other rules.
+    // Strategy: prepend all @imports to top, inject fallback body separately.
     const liveImport = `@import url("${tokenUrl}"); /* DesignSync live sync */`;
 
-    const themeBlock = [
+    // Fallback block has NO @import lines — safe to insert anywhere
+    const fallbackBlock = [
       "/* designsync-theme-start */",
-      liveImport,           // ① live sync — overrides fallback when server up
-      ...importLines,       // ② Google Fonts CDN etc.
       "/* designsync-fallback-start */",
-      tokenBody,            // ③ inlined fallback tokens
+      tokenBody,            // ① inlined fallback tokens
       "/* designsync-fallback-end */",
-      themeInlineBlock,     // ④ @theme inline for Tailwind
+      themeInlineBlock,     // ② @theme inline for Tailwind
       "/* designsync-theme-end */",
     ].join("\n");
 
     const tailwindV4Regex = /(@import\s+["']tailwindcss["'];?[ \t]*\n?)/;
     const tailwindV3Regex = /(@tailwind\s+base;?[ \t]*\n?)/;
 
+    // Inject fallback block after tailwind (no @import inside, so position doesn't matter)
     if (tailwindV4Regex.test(cssContent)) {
-      cssContent = cssContent.replace(tailwindV4Regex, `$1\n${themeBlock}\n\n`);
+      cssContent = cssContent.replace(tailwindV4Regex, `$1\n${fallbackBlock}\n\n`);
     } else if (tailwindV3Regex.test(cssContent)) {
-      cssContent = cssContent.replace(tailwindV3Regex, `${themeBlock}\n\n$1`);
+      cssContent = cssContent.replace(tailwindV3Regex, `${fallbackBlock}\n\n$1`);
     } else {
-      cssContent = themeBlock + "\n\n" + cssContent;
+      cssContent = fallbackBlock + "\n\n" + cssContent;
     }
+
+    // ALWAYS prepend @import lines at the absolute top (CSS spec requirement)
+    const topImports = [liveImport, ...importLines].join("\n");
+    cssContent = topImports + "\n\n" + cssContent;
 
     // Inject font-family into body if missing
     if (!cssContent.includes("font-family") || !/body\s*\{[^}]*font-family/.test(cssContent)) {
