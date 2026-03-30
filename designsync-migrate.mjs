@@ -1211,6 +1211,25 @@ writeReport();
 if (DRY_RUN) {
   console.log(`\n✅  dry-run 완료 — 실제 마이그레이션하려면 --dry-run 플래그 없이 실행\n`);
 } else if (safetyBranch) {
-  console.log(`\n💡  문제가 있으면: git checkout main && git branch -D ${safetyBranch}`);
-  console.log(`   백업 파일: ${BACKUP_DIR}/\n`);
+  // Auto-merge back to original branch if migration succeeded
+  const rolledBack = reportRows.filter(r => r.status === "rolled-back").length;
+  const hardFailed = failed;
+
+  if (hardFailed === 0 && rolledBack === 0) {
+    try {
+      const baseBranch = execSync("git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null || echo refs/remotes/origin/main", { cwd: projectRoot, stdio: "pipe" }).toString().trim().replace("refs/remotes/origin/", "");
+      execSync(`git checkout "${baseBranch}"`, { cwd: projectRoot, stdio: "pipe" });
+      execSync(`git merge --no-ff "${safetyBranch}" -m "chore: DesignSync migration"`, { cwd: projectRoot, stdio: "pipe" });
+      execSync(`git branch -d "${safetyBranch}"`, { cwd: projectRoot, stdio: "pipe" });
+      console.log(`\n✅  main 머지 완료 — 브랜치 ${safetyBranch} 삭제됨\n`);
+    } catch (e) {
+      // Merge failed — leave on branch, user decides
+      console.log(`\n⚠️  자동 머지 실패 — 브랜치 ${safetyBranch} 유지`);
+      console.log(`   수동 머지: git checkout main && git merge ${safetyBranch}\n`);
+    }
+  } else {
+    console.log(`\n⚠️  실패/롤백 있음 — 브랜치 ${safetyBranch} 유지 (수동 검토 후 머지)`);
+    console.log(`   머지: git checkout main && git merge ${safetyBranch}`);
+    console.log(`   폐기: git checkout main && git branch -D ${safetyBranch}\n`);
+  }
 }
