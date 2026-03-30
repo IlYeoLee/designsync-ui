@@ -13,7 +13,8 @@
     "components",
     "lib",
     "postinstall.mjs",
-    "eslint-plugin-designsync.mjs"
+    "eslint-plugin-designsync.mjs",
+    "designsync-migrate.mjs"
   ],
   "scripts": {
     "postinstall": "node postinstall.mjs"
