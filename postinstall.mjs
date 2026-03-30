@@ -1302,7 +1302,7 @@ if (process.env.DESIGNSYNC_MIGRATE === "true") {
     console.log("");
     const migrateScript = path.join(__dirname, "designsync-migrate.mjs");
     try {
-      execSync(`node "${migrateScript}" "${migrateTarget}"`, {
+      execSync(`node "${migrateScript}" "${migrateTarget}" --interactive`, {
         cwd: origCwd,
         stdio: "inherit",
         env: process.env,
