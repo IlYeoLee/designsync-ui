@@ -1034,7 +1034,17 @@ let done = 0, failed = 0;
 
 async function processSingleFile(filePath, screenshotB64, useVote = false) {
   const originalContent = readFileSync(filePath, "utf-8");
-  const originalViolations = getViolations(filePath).length;
+
+  // Snapshot pre-existing violations by identity (line:col:ruleId)
+  // so we never retry or count errors that existed BEFORE migration
+  const preExistingKeys = new Set(
+    getViolations(filePath).map(v => `${v.line}:${v.column}:${v.ruleId}`)
+  );
+  const originalViolations = preExistingKeys.size;
+
+  function getNewViolations(fp) {
+    return getViolations(fp).filter(v => !preExistingKeys.has(`${v.line}:${v.column}:${v.ruleId}`));
+  }
 
   // Backup original before any modification
   backupFile(filePath);
@@ -1057,18 +1067,18 @@ async function processSingleFile(filePath, screenshotB64, useVote = false) {
 
   let attempts = 1;
   while (attempts < 3) {
-    // Check BOTH ESLint AND TypeScript errors
-    const violations = getViolations(filePath);
+    // Only check NEW violations introduced by migration (ignore pre-existing)
+    const newViolations = getNewViolations(filePath);
     const tsErrors = getTsErrors(filePath);
-    if (violations.length === 0 && tsErrors.length === 0) break;
+    if (newViolations.length === 0 && tsErrors.length === 0) break;
 
     try { execSync(`npx eslint "${filePath}" --fix --quiet`, { stdio: "pipe" }); } catch {}
-    const remaining = getViolations(filePath);
+    const remainingNew = getNewViolations(filePath);
     const remainingTs = getTsErrors(filePath);
-    if (remaining.length === 0 && remainingTs.length === 0) break;
+    if (remainingNew.length === 0 && remainingTs.length === 0) break;
 
     const violationSummary = [
-      ...remaining.slice(0, 8).map(v => `ESLint Line ${v.line}: ${v.message}`),
+      ...remainingNew.slice(0, 8).map(v => `ESLint Line ${v.line}: ${v.message}`),
       ...remainingTs.slice(0, 6).map(e => `TypeScript: ${e}`),
     ].join("\n");
 
@@ -1079,23 +1089,23 @@ async function processSingleFile(filePath, screenshotB64, useVote = false) {
   }
   try { execSync(`npx eslint "${filePath}" --fix --quiet`, { stdio: "pipe" }); } catch {}
 
-  const finalViolations = getViolations(filePath).length;
+  const finalNewViolations = getNewViolations(filePath).length;
 
-  // Regression check: if violations increased, restore original
-  if (finalViolations > originalViolations) {
+  // Regression check: if NEW violations introduced, restore original
+  if (finalNewViolations > 0) {
     restoreFile(filePath);
-    recordReport(filePath, "rolled-back", finalViolations, `원본보다 violations 증가 (${originalViolations}→${finalViolations})`);
+    recordReport(filePath, "rolled-back", finalNewViolations, `마이그레이션으로 새 violations 도입 (${finalNewViolations}개)`);
     return { status: "rolled-back", violations: originalViolations };
   }
 
-  if (finalViolations === 0) {
+  if (finalNewViolations === 0) {
     addExample(basename(filePath), originalContent, readFileSync(filePath, "utf-8"));
     recordReport(filePath, "✅");
     return { status: "ok", violations: 0 };
   }
 
-  recordReport(filePath, "⚠️", finalViolations);
-  return { status: "warn", violations: finalViolations };
+  recordReport(filePath, "⚠️", finalNewViolations);
+  return { status: "warn", violations: finalNewViolations };
 }
 
 for (const group of groups) {
