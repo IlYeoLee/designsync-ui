@@ -25,6 +25,7 @@ const OPENAI_KEY    = process.env.OPENAI_API_KEY;
 const VISUAL_MODE   = process.argv.includes("--visual");
 const DRY_RUN       = process.argv.includes("--dry-run");
 const RESUME        = process.argv.includes("--resume");
+const INTERACTIVE   = process.argv.includes("--interactive");
 const srcDir        = process.argv.find((a, i) => i >= 2 && !a.startsWith("--")) || "src";
 const projectRoot   = resolve(srcDir, "..");
 
@@ -929,9 +930,143 @@ async function createSafetyBranch(projectRoot) {
   }
 }
 
+// ── Interactive mode helpers ──────────────────────────────────────────
+import { createInterface } from "readline";
+
+function ask(question) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise(resolve => {
+    rl.question(question, answer => { rl.close(); resolve(answer.trim().toLowerCase()); });
+  });
+}
+
+function getCodeContext(filePath, line, contextLines = 3) {
+  try {
+    const lines = readFileSync(filePath, "utf-8").split("\n");
+    const start = Math.max(0, line - 1 - contextLines);
+    const end = Math.min(lines.length, line + contextLines);
+    return lines.slice(start, end).map((l, i) => {
+      const lineNum = start + i + 1;
+      const marker = lineNum === line ? "→ " : "  ";
+      return `${marker}${String(lineNum).padStart(4)} │ ${l}`;
+    }).join("\n");
+  } catch { return ""; }
+}
+
+// Describe violation in human-readable form
+function describeViolation(v) {
+  const r = v.ruleId || "";
+  if (r.includes("no-raw-button")) return `raw <button> → <Button variant="...">`;
+  if (r.includes("no-raw-input"))  return `raw <input> → <Input>`;
+  if (r.includes("no-raw-header")) return `raw <header> → <Header>`;
+  if (r.includes("no-raw-aside"))  return `raw <aside> → <Sidebar>`;
+  if (r.includes("no-raw-h"))      return `raw <h1>~<h6> → <TypographyH1>~`;
+  if (r.includes("no-hardcoded-color"))  return `하드코딩 색상 → DS 토큰`;
+  if (r.includes("no-hardcoded-radius")) return `하드코딩 radius → var(--ds-*-radius)`;
+  if (r.includes("no-hardcoded-height")) return `하드코딩 height → var(--ds-button-h-*)`;
+  if (r.includes("no-raw-table"))  return `raw <table> → <Table>`;
+  if (r.includes("no-svg-chart"))  return `SVG 차트 → <ChartContainer>`;
+  return v.message?.slice(0, 80) || r;
+}
+
+async function runInteractiveMode(toMigrate) {
+  console.log(`\n🎯  Interactive 마이그레이션 모드`);
+  console.log(`   파일별로 위반 항목을 하나씩 보여줍니다.`);
+  console.log(`   y = 교체  /  n = 건너뜀  /  s = 이 파일 전체 스킵  /  q = 종료\n`);
+  console.log(`${"─".repeat(60)}\n`);
+
+  let totalApproved = 0, totalSkipped = 0, totalFixed = 0, totalFailed = 0;
+
+  for (const filePath of toMigrate) {
+    const relPath = relative(projectRoot, filePath);
+    const violations = getViolations(filePath);
+    if (violations.length === 0) continue;
+
+    console.log(`\n📄  ${relPath}  (${violations.length}개 위반)\n`);
+
+    const approvedViolations = [];
+    let skipFile = false;
+
+    for (const v of violations) {
+      if (skipFile) break;
+      const desc = describeViolation(v);
+      const context = getCodeContext(filePath, v.line);
+      console.log(`  Line ${v.line}: ${desc}`);
+      if (context) console.log(`\n${context}\n`);
+
+      const answer = await ask(`  교체할까요? (y/n/s/q) › `);
+      if (answer === "q") {
+        console.log(`\n👋  종료\n`);
+        writeReport();
+        process.exit(0);
+      }
+      if (answer === "s") { skipFile = true; totalSkipped += violations.length; break; }
+      if (answer === "y") { approvedViolations.push(v); totalApproved++; }
+      else { totalSkipped++; }
+      console.log("");
+    }
+
+    if (skipFile || approvedViolations.length === 0) continue;
+
+    // Migrate the file targeting only approved violations
+    process.stdout.write(`  🔄  ${approvedViolations.length}개 항목 교체 중...`);
+    backupFile(filePath);
+
+    try {
+      const content = readFileSync(filePath, "utf-8");
+      const violationDesc = approvedViolations.map(v =>
+        `Line ${v.line}: ${describeViolation(v)} — "${v.message}"`
+      ).join("\n");
+
+      const targetedPrompt = `Migrate this file (${basename(filePath)}).
+FIX ONLY these specific violations (do NOT change anything else):
+${violationDesc}
+
+Leave all other code exactly as-is.`;
+
+      const raw = ANTHROPIC_KEY
+        ? await migrateViaAnthropic(content, targetedPrompt, null)
+        : OPENAI_KEY
+        ? await migrateViaOpenAI(content, targetedPrompt, null)
+        : await migrateViaServer(content, targetedPrompt, null);
+
+      const fixed = deterministicFix(raw.replace(/^```(?:tsx?|jsx?)?\n?/, "").replace(/\n?```\s*$/, ""));
+      writeFileSync(filePath, fixed);
+      try { execSync(`npx eslint "${filePath}" --fix --quiet`, { stdio: "pipe" }); } catch {}
+
+      // Check only the violations user approved
+      const remaining = getViolations(filePath).filter(v =>
+        approvedViolations.some(a => a.line === v.line && a.ruleId === v.ruleId)
+      );
+
+      if (remaining.length === 0) {
+        process.stdout.write(` ✅\n`);
+        recordReport(filePath, "✅", 0, `interactive: ${approvedViolations.length}개 교체`);
+        totalFixed++;
+      } else {
+        // Partial success — restore and report
+        restoreFile(filePath);
+        process.stdout.write(` ↩️  롤백 (${remaining.length}개 미해결)\n`);
+        recordReport(filePath, "rolled-back", remaining.length, "interactive 교체 실패");
+        totalFailed++;
+      }
+    } catch (err) {
+      restoreFile(filePath);
+      process.stdout.write(` ❌ (${err.message?.slice(0, 60)})\n`);
+      recordReport(filePath, "❌", 0, err.message?.slice(0, 80));
+      totalFailed++;
+    }
+  }
+
+  console.log(`\n${"━".repeat(60)}`);
+  console.log(`✅  ${totalFixed}개 파일 교체  |  ↩️  ${totalFailed}개 실패  |  ⏭️  ${totalSkipped}개 스킵`);
+  console.log(`${"━".repeat(60)}\n`);
+  writeReport();
+}
+
 // ── Main ──────────────────────────────────────────────────────────────
 const mode = ANTHROPIC_KEY ? "Claude 직접" : OPENAI_KEY ? "GPT-4o 직접" : "DesignSync 서버";
-const flags = [VISUAL_MODE && "Vision", DRY_RUN && "dry-run", RESUME && "resume"].filter(Boolean);
+const flags = [VISUAL_MODE && "Vision", DRY_RUN && "dry-run", RESUME && "resume", INTERACTIVE && "interactive"].filter(Boolean);
 const flagTag = flags.length ? ` + ${flags.join(", ")}` : "";
 
 console.log(`\n🚀  DesignSync AI Migration v2 (${mode}${flagTag})`);
@@ -1005,6 +1140,16 @@ const toMigrate = allFiles.filter((f) => {
   if (!v) recordReport(f, "✅", 0, "이미 준수");
   return v;
 });
+
+// ── Interactive mode: run and exit ────────────────────────────────────
+if (INTERACTIVE) {
+  if (toMigrate.length === 0) {
+    console.log("\n✅  모두 완료 — DesignSync 규칙 준수 중!");
+    process.exit(0);
+  }
+  await runInteractiveMode(toMigrate);
+  process.exit(0);
+}
 
 if (toMigrate.length === 0) {
   console.log("\n✅  모두 완료 — DesignSync 규칙 준수 중!");
