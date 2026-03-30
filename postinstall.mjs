@@ -788,6 +788,12 @@ if (cssFile && dsSlug) {
   cssContent = cssContent.replace(/@import\s+url\(["'][^"']*designsync[^"']*["']\)[^;\n]*;?[ \t]*\n?/gm, "");
   cssContent = cssContent.replace(/\/\* designsync-theme-start \*\/[\s\S]*?\/\* designsync-theme-end \*\/[ \t]*\n([ \t]*\n)*/m, "");
 
+  // Remove shadcn default :root block that overrides DS tokens
+  // Detects :root { --background: ...; --foreground: ...; } pattern (shadcn boilerplate)
+  cssContent = cssContent.replace(/:root\s*\{[^}]*--background:[^}]*--foreground:[^}]*\}/g, "");
+  // Also remove .dark { --background: ... } shadcn default
+  cssContent = cssContent.replace(/\.dark\s*\{[^}]*--background:[^}]*--foreground:[^}]*\}/g, "");
+
   try {
     // Fetch token CSS at install time
     let tokenCss = await fetchText(tokenUrl);
