@@ -2,24 +2,15 @@
 
 import * as React from "react"
 import * as TabsPrimitive from "@radix-ui/react-tabs"
-import { motion } from "framer-motion"
 
 import { cn } from "@/lib/utils"
 
 const TabsVariantContext = React.createContext<"pill" | "underline">("pill")
-const TabsIdContext = React.createContext<string>("")
 
 function Tabs({
-  id,
   ...props
-}: React.ComponentProps<typeof TabsPrimitive.Root> & { id?: string }) {
-  const autoId = React.useId()
-  const tabsId = id || autoId
-  return (
-    <TabsIdContext.Provider value={tabsId}>
-      <TabsPrimitive.Root data-slot="tabs" {...props} />
-    </TabsIdContext.Provider>
-  )
+}: React.ComponentProps<typeof TabsPrimitive.Root>) {
+  return <TabsPrimitive.Root data-slot="tabs" {...props} />
 }
 
 function TabsList({
@@ -55,7 +46,6 @@ function TabsTrigger({
   ...props
 }: React.ComponentProps<typeof TabsPrimitive.Trigger>) {
   const variant = React.useContext(TabsVariantContext)
-  const tabsId = React.useContext(TabsIdContext)
 
   return (
     <TabsPrimitive.Trigger
@@ -66,29 +56,13 @@ function TabsTrigger({
         variant === "pill" &&
           "rounded-[var(--ds-element-radius)] px-2 py-1 data-[state=active]:bg-background data-[state=active]:shadow-xs text-foreground focus-visible:border-ring focus-visible:outline-ring focus-visible:outline-1",
         variant === "underline" &&
-          "px-4 py-2.5 rounded-none text-muted-foreground hover:text-foreground data-[state=active]:text-foreground",
+          "px-4 py-2.5 rounded-none text-muted-foreground hover:text-foreground data-[state=active]:text-foreground after:absolute after:bottom-0 after:left-0 after:right-0 after:h-0.5 after:bg-primary after:scale-x-0 after:transition-transform after:duration-200 data-[state=active]:after:scale-x-100",
         className
       )}
       {...props}
     >
       {children}
-      {variant === "underline" && (
-        <TabsUnderlineIndicator layoutId={`tabs-underline-${tabsId}`} />
-      )}
     </TabsPrimitive.Trigger>
-  )
-}
-
-/** Animated underline — visible only when parent trigger is active (via CSS) */
-function TabsUnderlineIndicator({ layoutId }: { layoutId: string }) {
-  return (
-    <motion.div
-      layoutId={layoutId}
-      className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary hidden [[data-state=active]>&]:block"
-      style={{ borderRadius: 1 }}
-      transition={{ type: "spring", stiffness: 500, damping: 30 }}
-      data-slot="tabs-underline"
-    />
   )
 }
 
