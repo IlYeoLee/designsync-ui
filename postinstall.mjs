@@ -1223,4 +1223,38 @@ if (!dsSlug) {
   console.log("");
 }
 
+// ── Auto-migration (DESIGNSYNC_MIGRATE=true) ───────────────────────────
+if (process.env.DESIGNSYNC_MIGRATE === "true") {
+  // Auto-detect src directory
+  const candidateDirs = ["src", "app", "pages", "."];
+  let migrateTarget = null;
+  for (const dir of candidateDirs) {
+    const full = path.join(origCwd, dir);
+    if (fs.existsSync(full) && fs.statSync(full).isDirectory()) {
+      // Check if it contains any .tsx/.jsx files
+      const hasTsx = fs.readdirSync(full).some(f => f.endsWith(".tsx") || f.endsWith(".jsx") || f.endsWith(".ts"));
+      if (hasTsx) { migrateTarget = dir; break; }
+    }
+  }
+
+  if (migrateTarget) {
+    console.log(`  [migrate] DESIGNSYNC_MIGRATE=true — ${migrateTarget}/ 자동 마이그레이션 시작`);
+    console.log("");
+    const migrateScript = path.join(__dirname, "designsync-migrate.mjs");
+    try {
+      execSync(`node "${migrateScript}" "${migrateTarget}"`, {
+        cwd: origCwd,
+        stdio: "inherit",
+        env: process.env,
+      });
+    } catch {
+      // migration errors are shown inline — don't crash postinstall
+    }
+  } else {
+    console.log("  [migrate] 소스 디렉토리를 찾지 못했습니다. 수동으로 실행하세요:");
+    console.log("  node node_modules/designsync-ui/designsync-migrate.mjs src");
+    console.log("");
+  }
+}
+
 process.chdir(origCwd);
