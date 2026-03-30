@@ -887,6 +887,8 @@ const ELEMENT_MAP = [
   { tag: "code",       component: "TypographyCode",       importPath: "@/components/ui/typography" },
   { tag: "ul",         component: "TypographyList",       importPath: "@/components/ui/typography" },
   { tag: "ol",         component: "TypographyList",       importPath: "@/components/ui/typography" },
+  { tag: "small",      component: "TypographySmall",      importPath: "@/components/ui/typography" },
+  { tag: "kbd",        component: "Kbd",                  importPath: "@/components/ui/kbd" },
 ];
 
 // (import grouping for shared-path components is handled automatically via neededImports Map)
