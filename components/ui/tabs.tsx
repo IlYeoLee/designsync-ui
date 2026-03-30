@@ -2,8 +2,22 @@
 
 import * as React from "react"
 import * as TabsPrimitive from "@radix-ui/react-tabs"
+import { cva } from "class-variance-authority"
 
 import { cn } from "@/lib/utils"
+
+export const tabsListVariants = cva(
+  "inline-flex items-center justify-center",
+  {
+    variants: {
+      variant: {
+        pill: "bg-muted text-muted-foreground h-[var(--ds-input-h)] w-fit rounded-[var(--ds-card-radius)] p-1",
+        underline: "relative w-full border-b border-border gap-0 bg-transparent p-0 rounded-none h-auto",
+      },
+    },
+    defaultVariants: { variant: "pill" },
+  }
+)
 
 const TabsVariantContext = React.createContext<"pill" | "underline">("pill")
 
