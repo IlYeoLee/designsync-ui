@@ -15,7 +15,7 @@ import { readFileSync, writeFileSync, readdirSync, statSync } from "fs";
 import { join, extname, basename } from "path";
 import { execSync } from "child_process";
 
-const DESIGNSYNC_SERVER = "https://designsync-omega.vercel.app/api/migrate";
+const DESIGNSYNC_SERVER = "https://designsync-omega.vercel.app/r/migrate";
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 const OPENAI_KEY    = process.env.OPENAI_API_KEY;
 
