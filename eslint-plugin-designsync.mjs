@@ -152,21 +152,34 @@ const HARDCODED_MARGIN_RE = /^(?:m|mx|my|ml|mr|mt|mb)-(?:3|4|5|6|7|8)$/;
 
 // 5. Raw HTML elements → component replacements
 const RAW_ELEMENT_MAP = {
-  button: "Button (from @/components/ui/button)",
-  input: "Input (from @/components/ui/input)",
-  textarea: "Textarea (from @/components/ui/textarea)",
-  aside: "Sidebar (from @/components/ui/sidebar)",
-  header: "Header (from @/components/ui/header)",
-  table: "Table (from @/components/ui/table)",
-  h1: "TypographyH1 (from @/components/ui/typography)",
-  h2: "TypographyH2 (from @/components/ui/typography)",
-  h3: "TypographyH3 (from @/components/ui/typography)",
-  h4: "TypographyH4 (from @/components/ui/typography)",
-  h5: "TypographyH4 (from @/components/ui/typography)",
-  h6: "TypographyH4 (from @/components/ui/typography)",
-  hr: "Separator (from @/components/ui/separator)",
-  select: "NativeSelect or Select (from @/components/ui/native-select or @/components/ui/select)",
-  label: "Label (from @/components/ui/label)",
+  button:     { component: "Button",               importPath: "@/components/ui/button" },
+  input:      { component: "Input",                importPath: "@/components/ui/input" },
+  textarea:   { component: "Textarea",             importPath: "@/components/ui/textarea" },
+  select:     { component: "NativeSelect",         importPath: "@/components/ui/native-select" },
+  label:      { component: "Label",                importPath: "@/components/ui/label" },
+  aside:      { component: "Sidebar",              importPath: "@/components/ui/sidebar" },
+  header:     { component: "Header",               importPath: "@/components/ui/header" },
+  table:      { component: "Table",                importPath: "@/components/ui/table" },
+  thead:      { component: "TableHeader",          importPath: "@/components/ui/table" },
+  tbody:      { component: "TableBody",            importPath: "@/components/ui/table" },
+  tfoot:      { component: "TableFooter",          importPath: "@/components/ui/table" },
+  tr:         { component: "TableRow",             importPath: "@/components/ui/table" },
+  th:         { component: "TableHead",            importPath: "@/components/ui/table" },
+  td:         { component: "TableCell",            importPath: "@/components/ui/table" },
+  hr:         { component: "Separator",            importPath: "@/components/ui/separator" },
+  h1:         { component: "TypographyH1",         importPath: "@/components/ui/typography" },
+  h2:         { component: "TypographyH2",         importPath: "@/components/ui/typography" },
+  h3:         { component: "TypographyH3",         importPath: "@/components/ui/typography" },
+  h4:         { component: "TypographyH4",         importPath: "@/components/ui/typography" },
+  h5:         { component: "TypographyH4",         importPath: "@/components/ui/typography" },
+  h6:         { component: "TypographyH4",         importPath: "@/components/ui/typography" },
+  p:          { component: "TypographyP",          importPath: "@/components/ui/typography" },
+  blockquote: { component: "TypographyBlockquote", importPath: "@/components/ui/typography" },
+  code:       { component: "TypographyCode",       importPath: "@/components/ui/typography" },
+  ul:         { component: "TypographyList",       importPath: "@/components/ui/typography" },
+  ol:         { component: "TypographyList",       importPath: "@/components/ui/typography" },
+  small:      { component: "TypographySmall",      importPath: "@/components/ui/typography" },
+  kbd:        { component: "Kbd",                  importPath: "@/components/ui/kbd" },
 };
 
 // 6. SVG chart children
@@ -327,30 +340,108 @@ const noHardcodedPadding = createClassRule(
 const noRawHtmlElements = {
   meta: {
     type: "problem",
+    fixable: "code",
     docs: {
-      description: "Disallow raw HTML form elements; use DesignSync UI components instead.",
+      description: "Disallow raw HTML elements; use DesignSync UI components instead.",
     },
     messages: {
       rawElement:
-        "Raw <{{element}}> element — use <{{replacement}}> instead.",
+        "Raw <{{element}}> element — use <{{component}}> instead.",
+      addImport:
+        "Add missing import: {{importStatement}}",
     },
     schema: [],
   },
   create(context) {
+    // Track which components need imports: importPath → Set<component>
+    const neededImports = new Map();
+
+    function trackImport(importPath, component) {
+      if (!neededImports.has(importPath)) neededImports.set(importPath, new Set());
+      neededImports.get(importPath).add(component);
+    }
+
     return {
       JSXOpeningElement(node) {
         if (node.name.type !== "JSXIdentifier") return;
-        const name = node.name.name;
+        const tag = node.name.name;
+        const entry = RAW_ELEMENT_MAP[tag];
+        if (!entry) return;
 
-        if (RAW_ELEMENT_MAP[name]) {
-          context.report({
-            node,
-            messageId: "rawElement",
-            data: {
-              element: name,
-              replacement: RAW_ELEMENT_MAP[name],
-            },
-          });
+        const { component, importPath } = entry;
+        trackImport(importPath, component);
+
+        context.report({
+          node,
+          messageId: "rawElement",
+          data: { element: tag, component },
+          fix(fixer) {
+            const fixes = [fixer.replaceText(node.name, component)];
+            // Fix closing tag too (non-self-closing elements)
+            const closingEl = node.parent && node.parent.closingElement;
+            if (closingEl) {
+              fixes.push(fixer.replaceText(closingEl.name, component));
+            }
+            return fixes;
+          },
+        });
+      },
+
+      "Program:exit"(programNode) {
+        if (neededImports.size === 0) return;
+
+        const body = programNode.body;
+        const importDecls = body.filter((n) => n.type === "ImportDeclaration");
+
+        for (const [importPath, components] of neededImports) {
+          const existing = importDecls.find((d) => d.source.value === importPath);
+
+          if (existing) {
+            // Find which components are already imported
+            const existingNames = new Set(
+              existing.specifiers
+                .filter((s) => s.type === "ImportSpecifier")
+                .map((s) => s.imported.name)
+            );
+            const missing = [...components].filter((c) => !existingNames.has(c));
+            if (missing.length === 0) continue;
+
+            // Append missing specifiers to existing import
+            const lastSpecifier = existing.specifiers[existing.specifiers.length - 1];
+            const addStr = `, ${missing.join(", ")}`;
+            context.report({
+              node: existing,
+              messageId: "addImport",
+              data: { importStatement: addStr },
+              fix(fixer) {
+                return fixer.insertTextAfter(lastSpecifier, addStr);
+              },
+            });
+          } else {
+            // Insert new import after last existing import (or at top, after directives)
+            const importStr = `import { ${[...components].join(", ")} } from "${importPath}";\n`;
+            const insertAfter = importDecls.length > 0
+              ? importDecls[importDecls.length - 1]
+              : null;
+
+            context.report({
+              node: programNode,
+              messageId: "addImport",
+              data: { importStatement: importStr.trim() },
+              fix(fixer) {
+                if (insertAfter) {
+                  return fixer.insertTextAfter(insertAfter, `\n${importStr}`);
+                }
+                // No existing imports — insert before first non-directive statement
+                const firstStmt = body.find(
+                  (n) => !(n.type === "ExpressionStatement" && n.directive)
+                );
+                return firstStmt
+                  ? fixer.insertTextBefore(firstStmt, importStr)
+                  : fixer.insertTextBefore(body[0], importStr);
+              },
+            });
+          }
         }
       },
     };
