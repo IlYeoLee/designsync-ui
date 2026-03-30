@@ -592,13 +592,18 @@ if (cssFile && dsSlug) {
   cssContent = cssContent.replace(/^@import\s+url\(["'][^"']*designsync-tokens\.css["']\);?\s*\n?/m, "");
   cssContent = cssContent.replace(/\/\* designsync-theme-start \*\/[\s\S]*?\/\* designsync-theme-end \*\/\s*\n?/m, "");
 
+  // @import url() MUST come before any non-import CSS rules (CSS spec).
+  // Tailwind v4 expands @import "tailwindcss" into utility classes at build time,
+  // so anything placed after it is treated as post-rules and browsers would ignore @import.
+  // Solution: put liveImport at the very top, themeBlock right after @import "tailwindcss".
   const liveImport = `@import url("${liveUrl}");\n`;
   const themeBlock = `/* designsync-theme-start */\n${themeInlineBlock}\n/* designsync-theme-end */`;
 
   const tailwindImportRegex = /(@import\s+["']tailwindcss["'];?\s*\n?)/;
   if (tailwindImportRegex.test(cssContent)) {
-    // Inject live token import + theme block right after @import "tailwindcss"
-    cssContent = cssContent.replace(tailwindImportRegex, `$1\n${liveImport}\n${themeBlock}\n`);
+    // liveImport → top of file (before @import "tailwindcss")
+    // themeBlock → right after @import "tailwindcss"
+    cssContent = cssContent.replace(tailwindImportRegex, `${liveImport}\n$1\n${themeBlock}\n`);
   } else {
     cssContent = liveImport + "\n" + themeBlock + "\n" + cssContent;
   }
