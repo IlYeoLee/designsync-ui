@@ -229,6 +229,72 @@ if (fs.existsSync(utilsSrc) && !fs.existsSync(utilsDest)) {
 
 console.log(`  [1/6] Copied ${copied} components`);
 
+// ── 1.5. Ensure @/ path alias is configured ──────────────────────────
+(function ensurePathAlias() {
+  const aliasSrc = useSrc ? "./src/*" : "./*";
+  const aliasVal = useSrc ? "./src" : ".";
+
+  // ── tsconfig / jsconfig ───────────────────────────────────────────
+  const tsconfigCandidates = ["tsconfig.json", "tsconfig.app.json", "jsconfig.json"];
+  let tsconfigPatched = false;
+
+  for (const cfgName of tsconfigCandidates) {
+    const cfgPath = path.join(projectRoot, cfgName);
+    if (!fs.existsSync(cfgPath)) continue;
+    let cfg;
+    try { cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8")); } catch { continue; }
+
+    const co = cfg.compilerOptions || (cfg.compilerOptions = {});
+    const paths = co.paths || (co.paths = {});
+    if (paths["@/*"]) { tsconfigPatched = true; break; } // already present
+
+    if (!co.baseUrl) co.baseUrl = ".";
+    paths["@/*"] = [aliasSrc];
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n");
+    tsconfigPatched = true;
+    break;
+  }
+
+  // ── vite.config.ts / vite.config.js ──────────────────────────────
+  const viteConfigCandidates = ["vite.config.ts", "vite.config.js"];
+  let vitePatched = false;
+
+  for (const vcName of viteConfigCandidates) {
+    const vcPath = path.join(projectRoot, vcName);
+    if (!fs.existsSync(vcPath)) continue;
+    let vc = fs.readFileSync(vcPath, "utf-8");
+
+    if (vc.includes('"@"') || vc.includes("'@'")) { vitePatched = true; break; } // already present
+
+    // Ensure path import exists at top
+    if (!vc.includes("import path from") && !vc.includes('import path from "path"')) {
+      vc = `import path from "path";\n` + vc;
+    }
+
+    if (/\bresolve\s*:/.test(vc)) {
+      // Has resolve: block but no @ alias — inject inside alias object if present, else add alias
+      if (/\balias\s*:/.test(vc)) {
+        vc = vc.replace(/(\balias\s*:\s*\{)/, `$1\n      "@": path.resolve(__dirname, "${aliasVal}"),`);
+      } else {
+        vc = vc.replace(/(\bresolve\s*:\s*\{)/, `$1\n    alias: { "@": path.resolve(__dirname, "${aliasVal}") },`);
+      }
+    } else {
+      // No resolve: block — inject before closing }) of defineConfig
+      vc = vc.replace(/(}\s*\)\s*;?\s*)$/, `  resolve: { alias: { "@": path.resolve(__dirname, "${aliasVal}") } },\n$1`);
+    }
+
+    fs.writeFileSync(vcPath, vc);
+    vitePatched = true;
+    break;
+  }
+
+  if (tsconfigPatched || vitePatched) {
+    console.log("  [1.5/6] Path alias @/ configured");
+  } else {
+    console.log("  [1.5/6] Path alias @/ already present");
+  }
+})();
+
 // ── 2. Icon library detection + full lucide→target rewriting ─────────
 
 const ICON_MAP = {
@@ -482,10 +548,19 @@ function rewriteIconImports(filePath, targetPkg, lib) {
     (_match, importList) => {
       const icons = importList.split(",").map((s) => s.trim()).filter(Boolean);
       const mapped = icons.map((icon) => {
-        const entry = ICON_MAP[icon];
+        const aliasMatch = icon.match(/^(\S+)\s+as\s+(\S+)$/);
+        const baseName = aliasMatch ? aliasMatch[1] : icon;
+        const userAlias = aliasMatch ? aliasMatch[2] : null;
+
+        const entry = ICON_MAP[baseName];
         if (!entry || !entry[lib]) return icon;
         const newName = entry[lib];
-        return newName === icon ? icon : `${newName} as ${icon}`;
+
+        if (newName === baseName) return icon; // no change needed
+        // If user had an alias, keep their alias: `NewName as userAlias`
+        // If no alias, rename with original name as alias: `NewName as baseName`
+        const alias = userAlias || baseName;
+        return `${newName} as ${alias}`;
       });
       return `import { ${mapped.join(", ")} } from "${targetPkg}"`;
     }
@@ -602,12 +677,17 @@ if (cssFile && dsSlug) {
   const themeBlock = `/* designsync-theme-start */\n${themeInlineBlock}\n/* designsync-theme-end */`;
 
   // Use [ \t]* (not \s*) so we only capture the line, not following blank lines
-  const tailwindImportRegex = /(@import\s+["']tailwindcss["'];?[ \t]*\n?)/;
-  if (tailwindImportRegex.test(cssContent)) {
-    // liveImport → before @import "tailwindcss" (CSS spec: @import must precede other rules)
-    // themeBlock → right after @import "tailwindcss"
-    cssContent = cssContent.replace(tailwindImportRegex, `${liveImport}\n$1\n${themeBlock}\n\n`);
+  const tailwindV4Regex = /(@import\s+["']tailwindcss["'];?[ \t]*\n?)/;
+  const tailwindV3Regex = /(@tailwind\s+base;?[ \t]*\n?)/;
+
+  if (tailwindV4Regex.test(cssContent)) {
+    // Tailwind v4: inject liveImport before, themeBlock after
+    cssContent = cssContent.replace(tailwindV4Regex, `${liveImport}\n$1\n${themeBlock}\n\n`);
+  } else if (tailwindV3Regex.test(cssContent)) {
+    // Tailwind v3: only inject liveImport before @tailwind base (no @theme inline)
+    cssContent = cssContent.replace(tailwindV3Regex, `${liveImport}\n$1`);
   } else {
+    // No tailwind: prepend liveImport + themeBlock
     cssContent = liveImport + "\n" + themeBlock + "\n\n" + cssContent;
   }
   fs.writeFileSync(cssFile, cssContent);
@@ -796,11 +876,13 @@ const ELEMENT_MAP = [
   { tag: "tr",       component: "TableRow",      importPath: "@/components/ui/table" },
   { tag: "th",       component: "TableHead",     importPath: "@/components/ui/table" },
   { tag: "td",       component: "TableCell",     importPath: "@/components/ui/table" },
+  { tag: "hr",       component: "Separator",     importPath: "@/components/ui/separator" },
   // Typography
   { tag: "h1",       component: "TypographyH1",  importPath: "@/components/ui/typography" },
   { tag: "h2",       component: "TypographyH2",  importPath: "@/components/ui/typography" },
   { tag: "h3",       component: "TypographyH3",  importPath: "@/components/ui/typography" },
   { tag: "h4",       component: "TypographyH4",  importPath: "@/components/ui/typography" },
+  { tag: "p",        component: "TypographyP",   importPath: "@/components/ui/typography" },
 ];
 
 // (import grouping for shared-path components is handled automatically via neededImports Map)
