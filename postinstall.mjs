@@ -770,17 +770,32 @@ function migrateClassTokens(filePath) {
 // ── 6b. HTML element → DesignSync component migration ────────────────
 
 // Elements to migrate: { tag, component, importPath }
-// We skip input/select/textarea (too risky without knowing type/usage).
 const ELEMENT_MAP = [
-  { tag: "button",  component: "Button",        importPath: "@/components/ui/button" },
-  { tag: "h1",      component: "TypographyH1",  importPath: "@/components/ui/typography" },
-  { tag: "h2",      component: "TypographyH2",  importPath: "@/components/ui/typography" },
-  { tag: "h3",      component: "TypographyH3",  importPath: "@/components/ui/typography" },
-  { tag: "h4",      component: "TypographyH4",  importPath: "@/components/ui/typography" },
+  // Buttons
+  { tag: "button",   component: "Button",        importPath: "@/components/ui/button" },
+  // Form elements
+  { tag: "label",    component: "Label",         importPath: "@/components/ui/label" },
+  { tag: "textarea", component: "Textarea",      importPath: "@/components/ui/textarea" },
+  { tag: "select",   component: "NativeSelect",  importPath: "@/components/ui/native-select" },
+  { tag: "input",    component: "Input",         importPath: "@/components/ui/input" },
+  // Table elements
+  { tag: "table",    component: "Table",         importPath: "@/components/ui/table" },
+  { tag: "thead",    component: "TableHeader",   importPath: "@/components/ui/table" },
+  { tag: "tbody",    component: "TableBody",     importPath: "@/components/ui/table" },
+  { tag: "tfoot",    component: "TableFooter",   importPath: "@/components/ui/table" },
+  { tag: "tr",       component: "TableRow",      importPath: "@/components/ui/table" },
+  { tag: "th",       component: "TableHead",     importPath: "@/components/ui/table" },
+  { tag: "td",       component: "TableCell",     importPath: "@/components/ui/table" },
+  // Typography
+  { tag: "h1",       component: "TypographyH1",  importPath: "@/components/ui/typography" },
+  { tag: "h2",       component: "TypographyH2",  importPath: "@/components/ui/typography" },
+  { tag: "h3",       component: "TypographyH3",  importPath: "@/components/ui/typography" },
+  { tag: "h4",       component: "TypographyH4",  importPath: "@/components/ui/typography" },
 ];
 
-// Group Typography components so we emit a single import statement
+// Component groups that share a single import statement
 const TYPOGRAPHY_COMPONENTS = ["TypographyH1", "TypographyH2", "TypographyH3", "TypographyH4"];
+const TABLE_COMPONENTS = ["Table", "TableHeader", "TableBody", "TableFooter", "TableRow", "TableHead", "TableCell"];
 
 /**
  * Insert an import statement into a file's source, after the last existing import.
@@ -819,6 +834,24 @@ function isAlreadyImported(content, name, importPath) {
   // Match both named imports from that path
   const re = new RegExp(`import\\s*\\{[^}]*\\b${name}\\b[^}]*\\}\\s*from\\s*["']${importPath.replace(/\//g, "\\/")}["']`);
   return re.test(content);
+}
+
+/**
+ * Pre-process: replace <input type="checkbox" .../> with <Checkbox .../>
+ * Must run BEFORE the generic <input>→<Input> pass.
+ * Returns { content, changed }.
+ */
+function replaceCheckboxInputs(content) {
+  // Matches self-closing inputs where type="checkbox" or type='checkbox' (order-independent)
+  // Captures all attributes so they are preserved on the Checkbox component.
+  const re = /<input\b([^>]*)\btype=["']checkbox["']([^>]*)\/>/g;
+  let changed = false;
+  const next = content.replace(re, (_match, before, after) => {
+    changed = true;
+    const attrs = (before + after).trim().replace(/\s+/g, " ");
+    return attrs ? `<Checkbox ${attrs}/>` : `<Checkbox />`;
+  });
+  return { content: next, changed };
 }
 
 /**
@@ -868,6 +901,18 @@ function migrateElements(filePath) {
 
   let fileChanged = false;
   const neededImports = new Map(); // importPath → Set<componentName>
+
+  // Special pass: <input type="checkbox" .../> → <Checkbox .../> (must come before input→Input)
+  {
+    const { content: next, changed } = replaceCheckboxInputs(content);
+    if (changed) {
+      content = next;
+      fileChanged = true;
+      const cbPath = "@/components/ui/checkbox";
+      if (!neededImports.has(cbPath)) neededImports.set(cbPath, new Set());
+      neededImports.get(cbPath).add("Checkbox");
+    }
+  }
 
   for (const { tag, component, importPath } of ELEMENT_MAP) {
     const { content: next, changed } = replaceElementTags(content, tag, component);
@@ -919,8 +964,8 @@ try {
   let classTokenMigrated = 0;
   let elementMigrated = 0;
 
-  const elementCounters = {};
-  for (const { tag, component } of ELEMENT_MAP) {
+  const elementCounters = { "input[checkbox]": 0 };
+  for (const { tag } of ELEMENT_MAP) {
     elementCounters[tag] = 0;
   }
 
@@ -939,6 +984,8 @@ try {
         if (!filePath.includes(path.sep + "components" + path.sep + "ui" + path.sep)) {
           let content = fs.readFileSync(filePath, "utf-8");
           let anyChanged = false;
+          // Count checkbox inputs separately
+          if (/<input\b[^>]*\btype=["']checkbox["'][^>]*\/>/g.test(content)) elementCounters["input[checkbox]"]++;
           for (const { tag } of ELEMENT_MAP) {
             const openRe = new RegExp(`<${tag}(\\s|>|/)`, "g");
             if (openRe.test(content)) elementCounters[tag]++;
@@ -952,10 +999,13 @@ try {
     } catch {}
   }
 
-  const elementSummary = ELEMENT_MAP
-    .filter(({ tag }) => elementCounters[tag] > 0)
-    .map(({ tag, component }) => `${tag}→${component}`)
-    .join(", ");
+  const checkboxSummary = elementCounters["input[checkbox]"] > 0 ? ["input[checkbox]→Checkbox"] : [];
+  const elementSummary = [
+    ...checkboxSummary,
+    ...ELEMENT_MAP
+      .filter(({ tag }) => elementCounters[tag] > 0)
+      .map(({ tag, component }) => `${tag}→${component}`),
+  ].join(", ");
 
   console.log(`  [6/6] Class tokens: ${classTokenMigrated} files migrated`);
   if (elementMigrated > 0) {
