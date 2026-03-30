@@ -728,25 +728,33 @@ if (cssFile && dsSlug) {
   cssContent = cssContent.replace(/\/\* designsync-theme-start \*\/[\s\S]*?\/\* designsync-theme-end \*\/[ \t]*\n([ \t]*\n)*/m, "");
 
   try {
-    // Fetch token CSS at install time — no runtime server dependency
+    // Fetch token CSS at install time
     let tokenCss = await fetchText(tokenUrl);
 
-    // Download fonts locally → rewrite to /fonts/filename
+    // Download custom fonts locally → rewrite to /fonts/filename
     const { css: localizedCss, fontsDownloaded } = await localizefonts(tokenCss, projectRoot);
     tokenCss = localizedCss;
 
-    // Separate out @import lines (Google Fonts etc.) — must stay at top per CSS spec
+    // Separate @import lines (Google Fonts CDN etc.) from token body
     const importLines = [];
     const tokenBody = tokenCss.replace(/^@import\s+url\([^)]+\);?[ \t]*\n?/gm, (m) => {
       importLines.push(m.trim());
       return "";
     }).trim();
 
+    // ── HYBRID: live @import (top) + inlined fallback (below) ──
+    // CSS cascade: @import from server wins when reachable (live sync).
+    // Inlined fallback kicks in when server is unreachable (any deployment).
+    const liveImport = `@import url("${tokenUrl}"); /* DesignSync live sync */`;
+
     const themeBlock = [
       "/* designsync-theme-start */",
-      ...importLines,
-      tokenBody,
-      `${themeInlineBlock}`,
+      liveImport,           // ① live sync — overrides fallback when server up
+      ...importLines,       // ② Google Fonts CDN etc.
+      "/* designsync-fallback-start */",
+      tokenBody,            // ③ inlined fallback tokens
+      "/* designsync-fallback-end */",
+      themeInlineBlock,     // ④ @theme inline for Tailwind
       "/* designsync-theme-end */",
     ].join("\n");
 
@@ -771,7 +779,7 @@ if (cssFile && dsSlug) {
     }
 
     fs.writeFileSync(cssFile, cssContent);
-    console.log(`  [3/6] Tokens inlined (${fontsDownloaded} fonts downloaded to public/fonts/)`);
+    console.log(`  [3/6] Hybrid sync: live @import + inlined fallback (${fontsDownloaded} fonts locally)`);
   } catch (e) {
     console.log(`  [3/6] Token fetch failed (${e.message}) — skipping`);
   }
