@@ -145,6 +145,29 @@ pagination prev/next        → <Pagination><PaginationContent><PaginationPrevio
 toast/notification          → import { toast } from "sonner"; toast("msg")  sonner
 SVG/canvas chart            → <ChartContainer config={chartConfig}> + recharts  @/components/ui/chart
 
+TIER 2 EXAMPLES — DS wrapper + custom inner (copy this pattern):
+custom page header (title + actions) →
+  <Header>
+    <HeaderBrand>{/* editable title, logo, breadcrumb — whatever was here */}</HeaderBrand>
+    <HeaderActions>{/* save status, buttons — keep as-is inside */}</HeaderActions>
+  </Header>
+custom sidebar (list of nav items) →
+  <Sidebar>
+    <SidebarHeader>{/* logo/title area */}</SidebarHeader>
+    <SidebarContent>
+      <SidebarMenu>
+        {items.map(i => <SidebarMenuItem><SidebarMenuButton asChild><Link href={i.href}>{i.label}</Link></SidebarMenuButton></SidebarMenuItem>)}
+      </SidebarMenu>
+    </SidebarContent>
+  </Sidebar>
+custom card (non-standard layout) →
+  <Card>
+    <CardHeader>{/* keep your custom header markup */}</CardHeader>
+    <CardContent>{/* keep your custom content */}</CardContent>
+  </Card>
+RULE: DS component provides shell/tokens, inner markup stays as needed.
+      NEVER restructure inner logic to fit DS — wrap it, don't rewrite it.
+
 COMPLEX (reconstruct):
 table+.map() rows    → const columns=[{accessorKey,header}]; <DataTable columns={columns} data={data}/>  @/components/ui/data-table
 overflow-hidden+prev/next slider → <Carousel><CarouselContent>{items.map(i=><CarouselItem/>)}</CarouselContent><CarouselPrevious/><CarouselNext/></Carousel>  @/components/ui/carousel
