@@ -666,14 +666,16 @@ ${multiFilePrompt}`;
 function deterministicFix(content) {
   let r = content;
 
-  // 1. Button without variant → ghost (except type="submit" CTAs)
+  // 1. Button size="icon" without variant → ghost
+  r = r.replace(/<Button\s+size="icon"([^>]*?)>/g, (match, rest) => {
+    if (/variant\s*=/.test(rest)) return match;
+    return `<Button size="icon" variant="ghost"${rest}>`;
+  });
+  // 1b. Button wrapping heading/title content (h-auto, px-0 className hints) → ghost
   r = r.replace(/<Button(\s[^>]*)?>/g, (match, attrs = "") => {
-    if (/variant\s*=/.test(attrs)) return match; // already has variant
-    if (/type\s*=\s*["']submit["']/.test(attrs)) return `<Button variant="default"${attrs}>`; // form submit → default
-    if (/size\s*=\s*["']icon["']/.test(attrs)) return `<Button variant="ghost"${attrs}>`; // icon button → ghost
-    // Check if it looks like a wrapper (contains heading/title content via className check)
-    if (/className[^=]*=.*(?:title|heading|h-auto|px-0)/i.test(attrs)) return `<Button variant="ghost"${attrs}>`;
-    return `<Button variant="ghost"${attrs}>`; // default fallback → ghost
+    if (/variant\s*=/.test(attrs)) return match;
+    if (/h-auto|px-0/.test(attrs)) return `<Button variant="ghost"${attrs}>`;
+    return match; // leave other buttons for AI to decide — don't blindly set ghost
   });
 
   // 2. TabsList invalid variant → fix to closest valid value
