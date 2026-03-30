@@ -247,6 +247,125 @@ async function migrate(content, filename, screenshotB64) {
   return raw.replace(/^```(?:tsx?|jsx?)?\n?/, "").replace(/\n?```\s*$/, "");
 }
 
+// ── Group migration (multi-file) ─────────────────────────────────────
+
+// Parse relative imports from a file
+function parseRelativeImports(filePath) {
+  try {
+    const content = readFileSync(filePath, "utf-8");
+    const importRe = /from\s+["'](\.[^"']+)["']/g;
+    const deps = [];
+    let m;
+    while ((m = importRe.exec(content)) !== null) {
+      const rel = m[1];
+      const base = dirname(filePath);
+      const exts = [".tsx", ".ts", ".jsx", ".js", ""];
+      for (const ext of exts) {
+        const candidate = resolve(base, rel + ext);
+        if (existsSync(candidate)) { deps.push(candidate); break; }
+        // Try index file
+        const idx = resolve(base, rel, "index" + (ext || ".tsx"));
+        if (existsSync(idx)) { deps.push(idx); break; }
+      }
+    }
+    return deps;
+  } catch { return []; }
+}
+
+// Build connected component groups from import graph
+function buildFileGroups(allFiles) {
+  const fileSet = new Set(allFiles.map(f => resolve(f)));
+  const adj = new Map();
+
+  for (const f of allFiles) {
+    const abs = resolve(f);
+    if (!adj.has(abs)) adj.set(abs, new Set());
+    for (const dep of parseRelativeImports(f)) {
+      const depAbs = resolve(dep);
+      if (!fileSet.has(depAbs)) continue; // only group within our file set
+      adj.get(abs).add(depAbs);
+      if (!adj.has(depAbs)) adj.set(depAbs, new Set());
+      adj.get(depAbs).add(abs); // bidirectional
+    }
+  }
+
+  // BFS to find connected components
+  const visited = new Set();
+  const groups = [];
+
+  for (const f of allFiles) {
+    const abs = resolve(f);
+    if (visited.has(abs)) continue;
+    const group = [];
+    const queue = [abs];
+    visited.add(abs);
+    while (queue.length) {
+      const curr = queue.shift();
+      group.push(curr);
+      for (const neighbor of (adj.get(curr) || [])) {
+        if (!visited.has(neighbor)) {
+          visited.add(neighbor);
+          queue.push(neighbor);
+        }
+      }
+    }
+    groups.push(group);
+  }
+
+  return groups;
+}
+
+// Migrate a group of related files together
+async function migrateGroup(filePaths, screenshotB64) {
+  const files = filePaths.map(fp => ({
+    path: fp,
+    name: basename(fp),
+    content: readFileSync(fp, "utf-8"),
+  }));
+
+  const multiFilePrompt = files.map(f =>
+    `=== FILE: ${f.name} ===\n${f.content}`
+  ).join("\n\n");
+
+  const instruction = `Migrate ALL files below together as a group. They are related components that share state and imports.
+
+Return EACH migrated file in this exact format:
+=== FILE: filename.tsx ===
+[complete migrated file content]
+
+Files to migrate:
+${files.map(f => `- ${f.name}`).join("\n")}
+
+${multiFilePrompt}`;
+
+  const raw = ANTHROPIC_KEY
+    ? await migrateViaAnthropic(instruction, `group(${files.map(f=>f.name).join(", ")})`, screenshotB64)
+    : OPENAI_KEY
+    ? await migrateViaOpenAI(instruction, `group`, screenshotB64)
+    : await migrateViaServer(instruction, `group(${files.map(f=>f.name).join(", ")})`, screenshotB64);
+
+  // Parse response back into per-file content
+  const results = new Map();
+  const sections = raw.split(/=== FILE: ([^=]+) ===/);
+  for (let i = 1; i < sections.length; i += 2) {
+    const name = sections[i].trim();
+    const content = sections[i + 1]?.trim()
+      .replace(/^```(?:tsx?|jsx?)?\n?/, "")
+      .replace(/\n?```\s*$/, "") || "";
+    // Match back to original path by filename
+    const match = files.find(f => f.name === name || f.path.endsWith(name));
+    if (match && content) results.set(match.path, content);
+  }
+
+  // Fallback: if parsing failed, treat whole response as single file
+  if (results.size === 0 && files.length === 1) {
+    const cleaned = raw.replace(/^```(?:tsx?|jsx?)?\n?/, "").replace(/\n?```\s*$/, "");
+    results.set(files[0].path, cleaned);
+  }
+
+  return results;
+}
+
 // ── ESLint helpers ────────────────────────────────────────────────────
 function getViolations(filePath) {
   try {
@@ -298,6 +417,7 @@ if (VISUAL_MODE) {
   }
 }
 
+// Check which files need migration
 const toMigrate = allFiles.filter((f) => {
   process.stdout.write(`   checking ${f}...`);
   const v = hasViolations(f);
@@ -310,61 +430,87 @@ if (toMigrate.length === 0) {
   process.exit(0);
 }
 
-console.log(`\n⚡  ${toMigrate.length}개 파일 마이그레이션...\n`);
+// Build import-based groups from files that need migration
+const toMigrateSet = new Set(toMigrate.map(f => resolve(f)));
+const allGroups = buildFileGroups(toMigrate);
+
+// Filter groups: only include files that need migration
+const groups = allGroups.map(g => g.filter(f => toMigrateSet.has(resolve(f)))).filter(g => g.length > 0);
+
+const groupCount = groups.filter(g => g.length > 1).length;
+console.log(`\n⚡  ${toMigrate.length}개 파일 마이그레이션 (${groupCount}개 그룹 묶음)...\n`);
 let done = 0, failed = 0;
 
-for (const filePath of toMigrate) {
-  process.stdout.write(`   ${filePath} ...`);
-  try {
-    let content = readFileSync(filePath, "utf-8");
+async function processSingleFile(filePath, screenshotB64) {
+  let content = readFileSync(filePath, "utf-8");
+  let migrated = await migrate(content, basename(filePath), screenshotB64);
+  writeFileSync(filePath, migrated);
 
-    // Visual: try to capture screenshot for this page
+  let attempts = 1;
+  while (attempts < 3) {
+    const violations = getViolations(filePath);
+    if (violations.length === 0) break;
+    try { execSync(`npx eslint "${filePath}" --fix --quiet`, { stdio: "pipe" }); } catch {}
+    const remaining = getViolations(filePath);
+    if (remaining.length === 0) break;
+    const violationSummary = remaining.slice(0, 10).map(v => `Line ${v.line}: ${v.message}`).join("\n");
+    const retryContent = readFileSync(filePath, "utf-8");
+    const raw = await migrate(retryContent, `${basename(filePath)} [retry ${attempts}, fix:\n${violationSummary}]`, screenshotB64);
+    writeFileSync(filePath, raw.replace(/^```(?:tsx?|jsx?)?\n?/, "").replace(/\n?```\s*$/, ""));
+    attempts++;
+  }
+  try { execSync(`npx eslint "${filePath}" --fix --quiet`, { stdio: "pipe" }); } catch {}
+}
+
+for (const group of groups) {
+  const isGroup = group.length > 1;
+  const label = isGroup ? `[그룹 ${group.map(f => basename(f)).join(" + ")}]` : group[0];
+
+  process.stdout.write(`   ${label} ...`);
+  try {
+    // Visual: screenshot for the first page file in group
     let screenshotB64 = null;
     if (VISUAL_MODE && devBaseUrl) {
-      const pageUrl = guessPageUrl(filePath, devBaseUrl);
-      if (pageUrl) {
-        screenshotB64 = await captureScreenshot(pageUrl);
-        if (screenshotB64) process.stdout.write(" 📸");
+      for (const fp of group) {
+        const pageUrl = guessPageUrl(fp, devBaseUrl);
+        if (pageUrl) {
+          screenshotB64 = await captureScreenshot(pageUrl);
+          if (screenshotB64) { process.stdout.write(" 📸"); break; }
+        }
       }
     }
 
-    let migrated = await migrate(content, basename(filePath), screenshotB64);
-    writeFileSync(filePath, migrated);
-
-    // 재시도 루프: 위반 남아있으면 AI에게 위반 목록 + 재요청 (최대 3회)
-    let attempts = 1;
-    while (attempts < 3) {
-      const violations = getViolations(filePath);
-      if (violations.length === 0) break;
-
-      try { execSync(`npx eslint "${filePath}" --fix --quiet`, { stdio: "pipe" }); } catch {}
-
-      const remaining = getViolations(filePath);
-      if (remaining.length === 0) break;
-
-      const violationSummary = remaining.slice(0, 10).map(v => `Line ${v.line}: ${v.message}`).join("\n");
-      const retryContent = readFileSync(filePath, "utf-8");
-      const retryFilename = `${basename(filePath)} [retry ${attempts}, fix these violations:\n${violationSummary}]`;
-
-      const raw = await migrate(retryContent, retryFilename, screenshotB64);
-      migrated = raw.replace(/^```(?:tsx?|jsx?)?\n?/, "").replace(/\n?```\s*$/, "");
-      writeFileSync(filePath, migrated);
-      attempts++;
-    }
-
-    // 최종 ESLint --fix
-    try { execSync(`npx eslint "${filePath}" --fix --quiet`, { stdio: "pipe" }); } catch {}
-
-    const finalViolations = getViolations(filePath);
-    if (finalViolations.length === 0) {
-      process.stdout.write(" ✅\n");
+    if (isGroup) {
+      // Group migration: send all files together
+      const results = await migrateGroup(group, screenshotB64);
+      for (const [fp, content] of results) {
+        if (content) writeFileSync(fp, content);
+      }
+      // ESLint fix pass on all files in group
+      for (const fp of group) {
+        try { execSync(`npx eslint "${fp}" --fix --quiet`, { stdio: "pipe" }); } catch {}
+      }
+      const violations = group.flatMap(fp => getViolations(fp));
+      if (violations.length === 0) {
+        process.stdout.write(" ✅\n");
+      } else {
+        // Retry individually for remaining violations
+        for (const fp of group) {
+          if (getViolations(fp).length > 0) await processSingleFile(fp, screenshotB64);
+        }
+        const finalV = group.flatMap(fp => getViolations(fp));
+        process.stdout.write(finalV.length === 0 ? " ✅\n" : ` ⚠️  (${finalV.length}개 잔존)\n`);
+      }
+      done += group.length;
     } else {
-      process.stdout.write(` ⚠️  (${finalViolations.length}개 위반 잔존)\n`);
+      await processSingleFile(group[0], screenshotB64);
+      const finalViolations = getViolations(group[0]);
+      process.stdout.write(finalViolations.length === 0 ? " ✅\n" : ` ⚠️  (${finalViolations.length}개 잔존)\n`);
+      done++;
     }
-    done++;
   } catch (err) {
     process.stdout.write(` ❌ (${err.message})\n`);
-    failed++;
+    failed += group.length;
   }
   if (done % 10 === 0 && done > 0) await new Promise((r) => setTimeout(r, 1000));
 }
