@@ -808,6 +808,16 @@ if (cssFile && dsSlug) {
   cssContent = cssContent.replace(/\/\* designsync-theme-start \*\/[\s\S]*?\/\* designsync-theme-end \*\/[ \t]*\n([ \t]*\n)*/m, "");
   cssContent = cssContent.replace(/\/\* DesignSync → shadcn mapping \*\/[\s\S]*?(?=\n\/\*|\n@|\n\.[a-z]|$)/m, "");
 
+  // Replace hardcoded --font-sans / --font-mono inside any existing @theme inline
+  cssContent = cssContent.replace(
+    /(--font-sans\s*:)[^;]+;/g,
+    "$1 var(--ds-font-sans);"
+  );
+  cssContent = cssContent.replace(
+    /(--font-mono\s*:)[^;]+;/g,
+    "$1 var(--ds-font-mono);"
+  );
+
   // Inject @theme inline after tailwind import (if not already present)
   const tailwindV4Regex = /(@import\s+["']tailwindcss["'];?[ \t]*\n?)/;
   if (!cssContent.includes("@theme inline") && tailwindV4Regex.test(cssContent)) {
