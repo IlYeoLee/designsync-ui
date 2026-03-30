@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 /**
- * DesignSync AI Migration Script — High Accuracy Mode
+ * DesignSync AI Migration Script — v2 High Accuracy + Stability
  *
  * 사용법:
- *   node designsync-migrate.mjs [src 디렉토리]
- *   node designsync-migrate.mjs [src 디렉토리] --visual   ← 스크린샷 + Vision AI
+ *   node designsync-migrate.mjs [src]              기본 마이그레이션
+ *   node designsync-migrate.mjs [src] --visual     스크린샷 + Vision AI
+ *   node designsync-migrate.mjs [src] --dry-run    파일 수정 없이 미리보기
+ *   node designsync-migrate.mjs [src] --resume     중단된 마이그레이션 이어서
  *
  * API 키 없이 DesignSync 서버 사용 (무료):
  *   DESIGNSYNC_SLUG=xxxx node designsync-migrate.mjs src
@@ -13,15 +15,24 @@
  *   ANTHROPIC_API_KEY=sk-ant-... node designsync-migrate.mjs src
  */
 
-import { readFileSync, writeFileSync, readdirSync, statSync, existsSync, mkdirSync } from "fs";
-import { join, extname, basename, dirname, resolve } from "path";
+import { readFileSync, writeFileSync, readdirSync, statSync, existsSync, mkdirSync, copyFileSync } from "fs";
+import { join, extname, basename, dirname, resolve, relative } from "path";
 import { execSync } from "child_process";
 
 const DESIGNSYNC_SERVER = "https://designsync-omega.vercel.app/r/migrate";
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 const OPENAI_KEY    = process.env.OPENAI_API_KEY;
 const VISUAL_MODE   = process.argv.includes("--visual");
+const DRY_RUN       = process.argv.includes("--dry-run");
+const RESUME        = process.argv.includes("--resume");
 const srcDir        = process.argv.find((a, i) => i >= 2 && !a.startsWith("--")) || "src";
+const projectRoot   = resolve(srcDir, "..");
+
+// Paths
+const BACKUP_DIR    = join(projectRoot, ".designsync-backup");
+const PROGRESS_FILE = join(projectRoot, ".designsync-progress.json");
+const REPORT_FILE   = join(projectRoot, "designsync-report.md");
+const IGNORE_FILE   = join(projectRoot, ".designsync-ignore");
 
 // ── System prompt (compact version for local script) ─────────────────
 const SYSTEM_PROMPT = `You are a DesignSync migration assistant.
@@ -166,17 +177,19 @@ function guessPageUrl(filePath, baseUrl) {
 
 // ── AI migration functions ────────────────────────────────────────────
 async function migrateViaServer(content, filename, screenshotB64) {
-  const res = await fetch(DESIGNSYNC_SERVER, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ content, filename, screenshot: screenshotB64 || null }),
+  return withRetry(async () => {
+    const res = await fetch(DESIGNSYNC_SERVER, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content, filename, screenshot: screenshotB64 || null }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Server ${res.status}`);
+    }
+    const { migrated } = await res.json();
+    return migrated;
   });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || `Server ${res.status}`);
-  }
-  const { migrated } = await res.json();
-  return migrated;
 }
 
 async function migrateViaAnthropic(content, filename, screenshotB64) {
@@ -241,9 +254,10 @@ async function migrateViaOpenAI(content, filename, screenshotB64) {
 let PROJECT_CONTEXT = ""; // set after pre-analysis
 
 async function migrate(content, filename, screenshotB64) {
+  const componentNote = COMPONENT_LIST_ADDENDUM || "";
   const contextualContent = PROJECT_CONTEXT
-    ? `━━━ PROJECT CONTEXT ━━━\n${PROJECT_CONTEXT}${buildFewShotContext()}\n━━━ END CONTEXT ━━━\n\n${content}`
-    : content + buildFewShotContext();
+    ? `━━━ PROJECT CONTEXT ━━━\n${PROJECT_CONTEXT}${componentNote}${buildFewShotContext()}\n━━━ END CONTEXT ━━━\n\n${content}`
+    : content + componentNote + buildFewShotContext();
 
   const raw = ANTHROPIC_KEY
     ? await migrateViaAnthropic(contextualContent, filename, screenshotB64)
@@ -636,6 +650,170 @@ function findFiles(dir, result = []) {
   return result;
 }
 
+// ── Ignore list ───────────────────────────────────────────────────────
+function loadIgnorePatterns() {
+  if (!existsSync(IGNORE_FILE)) return [];
+  return readFileSync(IGNORE_FILE, "utf-8")
+    .split("\n")
+    .map(l => l.trim())
+    .filter(l => l && !l.startsWith("#"));
+}
+
+function isIgnored(filePath, patterns) {
+  const rel = relative(projectRoot, filePath).replace(/\\/g, "/");
+  return patterns.some(p => {
+    // Support glob-like: *.test.tsx, src/legacy/**, exact paths
+    const regex = new RegExp("^" + p.replace(/\./g, "\\.").replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*") + "$");
+    return regex.test(rel);
+  });
+}
+
+// ── Backup system ─────────────────────────────────────────────────────
+function backupFile(filePath) {
+  if (DRY_RUN) return;
+  mkdirSync(BACKUP_DIR, { recursive: true });
+  const rel = relative(projectRoot, filePath).replace(/\\/g, "_");
+  const dest = join(BACKUP_DIR, rel);
+  // Only backup once (don't overwrite original with already-migrated content)
+  if (!existsSync(dest)) copyFileSync(filePath, dest);
+}
+
+function restoreFile(filePath) {
+  const rel = relative(projectRoot, filePath).replace(/\\/g, "_");
+  const src = join(BACKUP_DIR, rel);
+  if (existsSync(src)) {
+    copyFileSync(src, filePath);
+    return true;
+  }
+  return false;
+}
+
+// ── Progress persistence ───────────────────────────────────────────────
+function loadProgress() {
+  if (!RESUME || !existsSync(PROGRESS_FILE)) return new Set();
+  try {
+    const data = JSON.parse(readFileSync(PROGRESS_FILE, "utf-8"));
+    return new Set(data.completed || []);
+  } catch { return new Set(); }
+}
+
+function saveProgress(completedSet) {
+  if (DRY_RUN) return;
+  writeFileSync(PROGRESS_FILE, JSON.stringify({ completed: [...completedSet], ts: new Date().toISOString() }));
+}
+
+// ── Report tracking ────────────────────────────────────────────────────
+const reportRows = []; // { file, tier, status, violations }
+
+function recordReport(file, status, violations = 0, notes = "") {
+  reportRows.push({ file: relative(projectRoot, file), status, violations, notes });
+}
+
+function writeReport() {
+  if (DRY_RUN) return;
+  const ok = reportRows.filter(r => r.status === "✅");
+  const warn = reportRows.filter(r => r.status === "⚠️");
+  const fail = reportRows.filter(r => r.status === "❌");
+  const skipped = reportRows.filter(r => r.status === "skipped");
+  const rolled = reportRows.filter(r => r.status === "rolled-back");
+
+  const lines = [
+    `# DesignSync Migration Report`,
+    `> Generated: ${new Date().toLocaleString("ko-KR")}`,
+    ``,
+    `## Summary`,
+    `| | Count |`,
+    `|---|---|`,
+    `| ✅ Success | ${ok.length} |`,
+    `| ⚠️ Partial (violations remain) | ${warn.length} |`,
+    `| ❌ Failed | ${fail.length} |`,
+    `| ↩️ Rolled back (regression) | ${rolled.length} |`,
+    `| ⏭️ Skipped (already done) | ${skipped.length} |`,
+    ``,
+    `## Files Needing Manual Review`,
+    ...(warn.length + fail.length + rolled.length === 0
+      ? ["All files migrated successfully! 🎉"]
+      : [...warn, ...fail, ...rolled].map(r =>
+          `- \`${r.file}\` ${r.status}${r.violations ? ` (${r.violations} violations)` : ""}${r.notes ? ` — ${r.notes}` : ""}`
+        )
+    ),
+    ``,
+    `## All Files`,
+    `| File | Status | Notes |`,
+    `|---|---|---|`,
+    ...reportRows.map(r => `| \`${r.file}\` | ${r.status} | ${r.notes || ""} |`),
+  ];
+  writeFileSync(REPORT_FILE, lines.join("\n"));
+  console.log(`\n📄  리포트 저장: ${REPORT_FILE}`);
+}
+
+// ── API retry (exponential backoff) ───────────────────────────────────
+async function withRetry(fn, maxAttempts = 3, baseMs = 1000) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      const isRateLimit = e.message?.includes("429") || e.message?.includes("rate");
+      if (attempt === maxAttempts || !isRateLimit) throw e;
+      const delay = baseMs * Math.pow(2, attempt - 1);
+      process.stdout.write(` [rate limit, ${delay / 1000}s 대기]`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+}
+
+// ── Installed component scanner ────────────────────────────────────────
+function scanInstalledComponents(root) {
+  const uiDir = join(root, "components", "ui");
+  if (!existsSync(uiDir)) {
+    // Try src/components/ui
+    const alt = join(root, "src", "components", "ui");
+    if (!existsSync(alt)) return null;
+    return readdirSync(alt).filter(f => f.endsWith(".tsx")).map(f => f.replace(".tsx", ""));
+  }
+  return readdirSync(uiDir).filter(f => f.endsWith(".tsx")).map(f => f.replace(".tsx", ""));
+}
+
+// ── CSS/SCSS token migration ────────────────────────────────────────────
+const CSS_TOKEN_MAP = [
+  // Colors
+  [/#3b82f6|#6366f1|#4f46e5|#2563eb/gi, "var(--color-primary)"],
+  [/#f9fafb|#f8fafc/gi, "var(--color-background)"],
+  [/#f3f4f6|#f1f5f9/gi, "var(--color-muted)"],
+  [/#111827|#0f172a/gi, "var(--color-foreground)"],
+  [/#6b7280|#94a3b8/gi, "var(--color-muted-foreground)"],
+  [/#e5e7eb|#e2e8f0/gi, "var(--color-border)"],
+  [/#ef4444|#dc2626/gi, "var(--color-destructive)"],
+  // Radius
+  [/border-radius:\s*0\.5rem/gi, "border-radius: var(--ds-button-radius)"],
+  [/border-radius:\s*0\.75rem/gi, "border-radius: var(--ds-card-radius)"],
+  [/border-radius:\s*1rem/gi, "border-radius: var(--ds-card-radius)"],
+  // Spacing
+  [/padding:\s*1\.5rem/gi, "padding: var(--ds-card-padding)"],
+  [/gap:\s*1rem/gi, "gap: var(--ds-section-gap)"],
+  [/gap:\s*0\.5rem/gi, "gap: var(--ds-internal-gap)"],
+];
+
+function migrateCssContent(content) {
+  let result = content;
+  for (const [pattern, replacement] of CSS_TOKEN_MAP) {
+    result = result.replace(pattern, replacement);
+  }
+  return result;
+}
+
+function findCssFiles(dir, result = []) {
+  let entries;
+  try { entries = readdirSync(dir); } catch { return result; }
+  for (const entry of entries) {
+    if (entry.startsWith(".") || entry === "node_modules") continue;
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) findCssFiles(full, result);
+    else if ([".css", ".scss"].includes(extname(entry)) && !entry.includes("designsync")) result.push(full);
+  }
+  return result;
+}
+
 // ── Git safety branch ─────────────────────────────────────────────────
 async function createSafetyBranch(projectRoot) {
   try {
@@ -667,15 +845,34 @@ async function createSafetyBranch(projectRoot) {
 }
 
 // ── Main ──────────────────────────────────────────────────────────────
-const allFiles = findFiles(srcDir);
 const mode = ANTHROPIC_KEY ? "Claude 직접" : OPENAI_KEY ? "GPT-4o 직접" : "DesignSync 서버";
-const visualTag = VISUAL_MODE ? " + Vision" : "";
+const flags = [VISUAL_MODE && "Vision", DRY_RUN && "dry-run", RESUME && "resume"].filter(Boolean);
+const flagTag = flags.length ? ` + ${flags.join(", ")}` : "";
 
-console.log(`\n🚀  DesignSync AI Migration (${mode}${visualTag})`);
+console.log(`\n🚀  DesignSync AI Migration v2 (${mode}${flagTag})`);
+if (DRY_RUN) console.log(`⚠️   DRY-RUN 모드 — 파일이 실제로 수정되지 않습니다\n`);
+
+// ── Ignore patterns ───────────────────────────────────────────────────
+const ignorePatterns = loadIgnorePatterns();
+if (ignorePatterns.length) console.log(`🚫  무시 패턴 ${ignorePatterns.length}개 로드\n`);
+
+// ── Installed component scan ──────────────────────────────────────────
+const installedComponents = scanInstalledComponents(projectRoot);
+let COMPONENT_LIST_ADDENDUM = "";
+if (installedComponents) {
+  COMPONENT_LIST_ADDENDUM = `\n\nINSTALLED DS COMPONENTS (use ONLY these — do NOT import others):\n${installedComponents.join(", ")}`;
+  console.log(`🧩  설치된 컴포넌트 ${installedComponents.length}개 감지\n`);
+}
+
+// ── Load progress (resume mode) ───────────────────────────────────────
+const completedFiles = loadProgress();
+if (RESUME && completedFiles.size > 0) console.log(`⏭️   ${completedFiles.size}개 파일 이미 완료 — 재개\n`);
+
+// ── File discovery ────────────────────────────────────────────────────
+const allFiles = findFiles(srcDir).filter(f => !isIgnored(f, ignorePatterns));
 console.log(`📁  ${srcDir}/ — ${allFiles.length}개 파일\n`);
 
 // ── Git safety branch (create before any file changes) ───────────────
-const projectRoot = resolve(srcDir, "..");
 const safetyBranch = await createSafetyBranch(projectRoot);
 
 // ── Pre-analysis pass ────────────────────────────────────────────────
@@ -710,11 +907,17 @@ if (VISUAL_MODE) {
   }
 }
 
-// Check which files need migration
+// Check which files need migration (skip already-completed in resume mode)
 const toMigrate = allFiles.filter((f) => {
+  const absF = resolve(f);
+  if (RESUME && completedFiles.has(absF)) {
+    recordReport(f, "skipped", 0, "resume: 이전 실행에서 완료");
+    return false;
+  }
   process.stdout.write(`   checking ${f}...`);
   const v = hasViolations(f);
   process.stdout.write(v ? " ⚠️\n" : " ✅\n");
+  if (!v) recordReport(f, "✅", 0, "이미 준수");
   return v;
 });
 
@@ -746,7 +949,17 @@ let done = 0, failed = 0;
 
 async function processSingleFile(filePath, screenshotB64, useVote = false) {
   const originalContent = readFileSync(filePath, "utf-8");
-  // Use parallel vote for complex files (>100 lines), single for small ones
+  const originalViolations = getViolations(filePath).length;
+
+  // Backup original before any modification
+  backupFile(filePath);
+
+  if (DRY_RUN) {
+    console.log(`   [dry-run] would migrate: ${basename(filePath)}`);
+    return { status: "dry-run", violations: 0 };
+  }
+
+  // Choose strategy by complexity
   const lineCount = originalContent.split("\n").length;
   let migrated;
   if (useVote && lineCount > 100 && ANTHROPIC_KEY) {
@@ -758,14 +971,12 @@ async function processSingleFile(filePath, screenshotB64, useVote = false) {
 
   let attempts = 1;
   while (attempts < 3) {
-    // ESLint violations
     const violations = getViolations(filePath);
     if (violations.length === 0) break;
     try { execSync(`npx eslint "${filePath}" --fix --quiet`, { stdio: "pipe" }); } catch {}
     const remaining = getViolations(filePath);
     if (remaining.length === 0) break;
 
-    // TypeScript errors too
     const tsErrors = getTsErrors(filePath);
     const violationSummary = [
       ...remaining.slice(0, 8).map(v => `ESLint Line ${v.line}: ${v.message}`),
@@ -779,11 +990,23 @@ async function processSingleFile(filePath, screenshotB64, useVote = false) {
   }
   try { execSync(`npx eslint "${filePath}" --fix --quiet`, { stdio: "pipe" }); } catch {}
 
-  // Add to few-shot examples if clean
-  const finalViolations = getViolations(filePath);
-  if (finalViolations.length === 0) {
-    addExample(basename(filePath), originalContent, readFileSync(filePath, "utf-8"));
+  const finalViolations = getViolations(filePath).length;
+
+  // Regression check: if violations increased, restore original
+  if (finalViolations > originalViolations) {
+    restoreFile(filePath);
+    recordReport(filePath, "rolled-back", finalViolations, `원본보다 violations 증가 (${originalViolations}→${finalViolations})`);
+    return { status: "rolled-back", violations: originalViolations };
   }
+
+  if (finalViolations === 0) {
+    addExample(basename(filePath), originalContent, readFileSync(filePath, "utf-8"));
+    recordReport(filePath, "✅");
+    return { status: "ok", violations: 0 };
+  }
+
+  recordReport(filePath, "⚠️", finalViolations);
+  return { status: "warn", violations: finalViolations };
 }
 
 for (const group of groups) {
@@ -805,35 +1028,46 @@ for (const group of groups) {
     }
 
     if (isGroup) {
-      const results = await migrateGroup(group, screenshotB64);
-      for (const [fp, content] of results) {
-        if (content) writeFileSync(fp, content);
-      }
-      for (const fp of group) {
-        try { execSync(`npx eslint "${fp}" --fix --quiet`, { stdio: "pipe" }); } catch {}
+      if (!DRY_RUN) {
+        // Backup all group files before touching them
+        for (const fp of group) backupFile(fp);
+        const results = await migrateGroup(group, screenshotB64);
+        for (const [fp, content] of results) {
+          if (content) writeFileSync(fp, content);
+        }
+        for (const fp of group) {
+          try { execSync(`npx eslint "${fp}" --fix --quiet`, { stdio: "pipe" }); } catch {}
+        }
       }
       const violations = group.flatMap(fp => getViolations(fp));
       if (violations.length === 0) {
         process.stdout.write(" ✅\n");
-        // 5. Update PROJECT_CONTEXT with successful group migration
         const groupNames = group.map(f => basename(f)).join(", ");
         PROJECT_CONTEXT += `\nSuccessfully migrated group: ${groupNames}`;
+        for (const fp of group) {
+          recordReport(fp, "✅");
+          completedFiles.add(resolve(fp));
+        }
       } else {
         for (const fp of group) {
           if (getViolations(fp).length > 0) await processSingleFile(fp, screenshotB64, true);
+          completedFiles.add(resolve(fp));
         }
         const finalV = group.flatMap(fp => getViolations(fp));
         process.stdout.write(finalV.length === 0 ? " ✅\n" : ` ⚠️  (${finalV.length}개 잔존)\n`);
       }
       done += group.length;
     } else {
-      await processSingleFile(group[0], screenshotB64, true);
-      const finalViolations = getViolations(group[0]);
-      process.stdout.write(finalViolations.length === 0 ? " ✅\n" : ` ⚠️  (${finalViolations.length}개 잔존)\n`);
+      const result = await processSingleFile(group[0], screenshotB64, true);
+      completedFiles.add(resolve(group[0]));
+      const icon = result?.status === "rolled-back" ? " ↩️\n" : result?.status === "ok" ? " ✅\n" : ` ⚠️  (${result?.violations}개 잔존)\n`;
+      process.stdout.write(icon);
       done++;
     }
+    saveProgress(completedFiles);
   } catch (err) {
     process.stdout.write(` ❌ (${err.message})\n`);
+    for (const fp of group) recordReport(fp, "❌", 0, err.message.slice(0, 80));
     failed += group.length;
   }
   if (done % 10 === 0 && done > 0) await new Promise((r) => setTimeout(r, 1000));
@@ -843,6 +1077,41 @@ console.log(`\n${"━".repeat(50)}`);
 console.log(`✅  ${done}개 완료${failed ? `  ❌  ${failed}개 실패` : ""}`);
 console.log(`${"━".repeat(50)}\n`);
 
+// ── CSS/SCSS token migration ───────────────────────────────────────────
+if (!DRY_RUN) {
+  const cssFiles = findCssFiles(resolve(srcDir, ".."));
+  const migratedCss = [];
+  for (const cf of cssFiles) {
+    const original = readFileSync(cf, "utf-8");
+    const updated = migrateCssContent(original);
+    if (updated !== original) {
+      backupFile(cf);
+      writeFileSync(cf, updated);
+      migratedCss.push(basename(cf));
+    }
+  }
+  if (migratedCss.length) {
+    console.log(`🎨  CSS/SCSS 토큰 치환: ${migratedCss.join(", ")}\n`);
+  }
+}
+
 // ── Build feedback loop ───────────────────────────────────────────────
-const allMigratedFiles = toMigrate;
-await buildFeedbackLoop(projectRoot, allMigratedFiles);
+if (!DRY_RUN) {
+  const allMigratedFiles = toMigrate;
+  await buildFeedbackLoop(projectRoot, allMigratedFiles);
+}
+
+// ── Cleanup progress file on full success ─────────────────────────────
+if (!DRY_RUN && failed === 0 && existsSync(PROGRESS_FILE)) {
+  try { execSync(`rm -f "${PROGRESS_FILE}"`); } catch {}
+}
+
+// ── Write migration report ─────────────────────────────────────────────
+writeReport();
+
+if (DRY_RUN) {
+  console.log(`\n✅  dry-run 완료 — 실제 마이그레이션하려면 --dry-run 플래그 없이 실행\n`);
+} else if (safetyBranch) {
+  console.log(`\n💡  문제가 있으면: git checkout main && git branch -D ${safetyBranch}`);
+  console.log(`   백업 파일: ${BACKUP_DIR}/\n`);
+}
