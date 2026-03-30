@@ -592,13 +592,15 @@ if (cssFile && dsSlug) {
   cssContent = cssContent.replace(/^@import\s+url\(["'][^"']*designsync-tokens\.css["']\);?\s*\n?/m, "");
   cssContent = cssContent.replace(/\/\* designsync-theme-start \*\/[\s\S]*?\/\* designsync-theme-end \*\/\s*\n?/m, "");
 
+  const liveImport = `@import url("${liveUrl}");\n`;
   const themeBlock = `/* designsync-theme-start */\n${themeInlineBlock}\n/* designsync-theme-end */`;
 
   const tailwindImportRegex = /(@import\s+["']tailwindcss["'];?\s*\n?)/;
   if (tailwindImportRegex.test(cssContent)) {
-    cssContent = cssContent.replace(tailwindImportRegex, `$1\n${themeBlock}\n`);
+    // Inject live token import + theme block right after @import "tailwindcss"
+    cssContent = cssContent.replace(tailwindImportRegex, `$1\n${liveImport}\n${themeBlock}\n`);
   } else {
-    cssContent = themeBlock + "\n" + cssContent;
+    cssContent = liveImport + "\n" + themeBlock + "\n" + cssContent;
   }
   fs.writeFileSync(cssFile, cssContent);
 
