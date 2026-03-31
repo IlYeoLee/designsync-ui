@@ -809,6 +809,9 @@ if (cssFile && dsSlug) {
   cssContent = cssContent.replace(/\/\* designsync-theme-start \*\/[\s\S]*?\/\* designsync-theme-end \*\/[ \t]*\n([ \t]*\n)*/m, "");
   cssContent = cssContent.replace(/\/\* DesignSync → shadcn mapping \*\/[\s\S]*?(?=\n\/\*|\n@|\n\.[a-z]|$)/m, "");
 
+  // Inject @import url at the very top of globals.css
+  cssContent = `@import url("${tokenUrl}");\n` + cssContent;
+
   // Replace hardcoded --font-sans / --font-mono inside any existing @theme inline
   cssContent = cssContent.replace(
     /(--font-sans\s*:)[^;]+;/g,
