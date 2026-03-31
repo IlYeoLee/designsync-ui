@@ -835,6 +835,14 @@ if (cssFile && dsSlug) {
 
   cssContent = cssContent.trimEnd() + "\n\n" + mappingBlock + "\n";
 
+  // Ensure body has font-family applied
+  if (!cssContent.includes("font-family: var(--font-sans")) {
+    cssContent = cssContent.replace(
+      /(body\s*\{[^}]*?)(})/s,
+      (m, inside, close) => `${inside}  font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif);\n  ${close}`
+    );
+  }
+
   fs.writeFileSync(cssFile, cssContent);
 
   // Inject <link rel="stylesheet"> into layout.tsx <head> for reliable token loading
