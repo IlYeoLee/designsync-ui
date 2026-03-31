@@ -1307,6 +1307,16 @@ try {
 console.log("  [done] DesignSync setup complete!");
 console.log("");
 
+if (dsSlug) {
+  console.log("  ─────────────────────────────────────────────────");
+  console.log("  기존 코드 마이그레이션 (선택 사항):");
+  console.log(`  https://designsync-omega.vercel.app/r/${dsSlug}/migrate`);
+  console.log("  → 프롬프트 복사 후 Claude / Cursor에 붙여넣기");
+  console.log("  → 완료 후 검증: npx eslint src/");
+  console.log("  ─────────────────────────────────────────────────");
+  console.log("");
+}
+
 if (!dsSlug) {
   console.log("  Tip: To enable live token sync, run:");
   console.log(`  DESIGNSYNC_SLUG=your-slug ${pkgManager} install github:IlYeoLee/designsync-ui`);
