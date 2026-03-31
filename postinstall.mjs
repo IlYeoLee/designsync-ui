@@ -635,6 +635,7 @@ const LIBRARY_PKG = {
 
 // Detect slug from .designsync.json or env
 let dsSlug = process.env.DESIGNSYNC_SLUG || "";
+const dsMode = process.env.DESIGNSYNC_MODE || "";
 
 const dsConfigPath = path.join(projectRoot, ".designsync.json");
 let dsConfig = {};
@@ -874,6 +875,25 @@ if (cssFile && dsSlug) {
   } else {
     console.log(`  [3/6] Live sync: shadcn mapping injected (layout.tsx not found for <link> tag)`);
   }
+
+  // ── Dark mode default: add className="dark" to <html> ──────────
+  if (dsMode === "dark" && layoutFile) {
+    let layoutContent = fs.readFileSync(layoutFile, "utf-8");
+    const alreadyDark = layoutContent.includes('className="dark') || layoutContent.includes("className='dark");
+    if (!alreadyDark) {
+      layoutContent = layoutContent.replace(
+        /(<html)([^>]*)(>)/,
+        (match, open, attrs, close) => {
+          if (attrs.includes("className=")) {
+            return open + attrs.replace(/className="([^"]*)"/, 'className="dark $1"') + close;
+          }
+          return open + attrs + ' className="dark"' + close;
+        }
+      );
+      fs.writeFileSync(layoutFile, layoutContent);
+      console.log(`  [3/6] Dark mode: className="dark" added to <html>`);
+    }
+  }
 } else if (cssFile) {
   console.log("  [3/6] Skipped (set DESIGNSYNC_SLUG env or create .designsync.json)");
 } else {
@@ -913,7 +933,12 @@ if (fs.existsSync(pluginSrc)) {
       const importLine = isESM
         ? `import { createRequire } from "module";\nconst __require = createRequire(import.meta.url);\nconst designsync = __require("./designsync-eslint.cjs");\n`
         : `const designsync = require("./designsync-eslint.cjs");\n`;
-      const configBlock = `  designsync,\n`;
+      const ALL_ICON_PKGS = ["lucide-react", "@tabler/icons-react", "@phosphor-icons/react", "@remixicon/react", "@hugeicons/react"];
+      const ICON_LIBRARY_PKG = { lucide: "lucide-react", tabler: "@tabler/icons-react", phosphor: "@phosphor-icons/react", remix: "@remixicon/react", hugeicons: "@hugeicons/react" };
+      const allowedPkg = ICON_LIBRARY_PKG[iconLibrary] || "lucide-react";
+      const blockedIconPkgs = ALL_ICON_PKGS.filter(p => p !== allowedPkg);
+      const blockedJson = JSON.stringify(blockedIconPkgs);
+      const configBlock = `  designsync,\n  {\n    files: ["**/*.{jsx,tsx}"],\n    rules: {\n      "designsync/no-wrong-icon-library": ["error", ${blockedJson}],\n    },\n    ignores: ["**/components/ui/**"],\n  },\n`;
 
       const lastImportIdx = eslintConfig.lastIndexOf("import ");
       const lineEnd = eslintConfig.indexOf("\n", lastImportIdx);
