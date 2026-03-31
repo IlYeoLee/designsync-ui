@@ -454,6 +454,31 @@ const noRawHtmlElements = {
   },
 };
 
+// ─── Rule: no-custom-tabs ────────────────────────────────────────────────────
+
+const noCustomTabs = {
+  meta: {
+    type: "suggestion",
+    docs: {
+      description: "Disallow custom tab implementations using Button+state; use <Tabs><TabsList><TabsTrigger>.",
+    },
+    messages: {
+      noCustomTabs: "커스텀 탭 구현 감지. <Tabs><TabsList><TabsTrigger><TabsContent>로 교체하세요.",
+    },
+    schema: [],
+  },
+  create(context) {
+    return {
+      VariableDeclarator(node) {
+        const name = node.id?.name || "";
+        if (/^(activeTab|selectedTab|currentTab|tabIndex)$/.test(name)) {
+          context.report({ node, messageId: "noCustomTabs" });
+        }
+      },
+    };
+  },
+};
+
 // ─── Rule: no-raw-svg-chart ─────────────────────────────────────────────────
 
 const noRawSvgChart = {
@@ -624,6 +649,7 @@ const plugin = {
     "no-hardcoded-height": noHardcodedHeight,
     "no-hardcoded-padding": noHardcodedPadding,
     "no-raw-html-elements": noRawHtmlElements,
+    "no-custom-tabs": noCustomTabs,
     "no-raw-svg-chart": noRawSvgChart,
     "no-arbitrary-font-size": noArbitraryFontSize,
     "no-arbitrary-shadow": noArbitraryShadow,
@@ -644,6 +670,7 @@ export default {
     "designsync/no-hardcoded-height": "error",
     "designsync/no-hardcoded-padding": "error",
     "designsync/no-raw-html-elements": "error",
+    "designsync/no-custom-tabs": "warn",
     "designsync/no-raw-svg-chart": "error",
     "designsync/no-arbitrary-font-size": "error",
     "designsync/no-arbitrary-shadow": "error",
