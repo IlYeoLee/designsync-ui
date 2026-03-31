@@ -809,6 +809,17 @@ if (cssFile && dsSlug) {
   cssContent = cssContent.replace(/\/\* designsync-theme-start \*\/[\s\S]*?\/\* designsync-theme-end \*\/[ \t]*\n([ \t]*\n)*/m, "");
   cssContent = cssContent.replace(/\/\* DesignSync → shadcn mapping \*\/[\s\S]*?(?=\n\/\*|\n@|\n\.[a-z]|$)/m, "");
 
+  // Remove shadcn default :root / .dark color blocks (they override DS tokens)
+  // These are the auto-generated grayscale oklch blocks from shadcn init
+  cssContent = cssContent.replace(
+    /\n?:root\s*\{[^}]*--background\s*:[^}]*\}/gs,
+    ""
+  );
+  cssContent = cssContent.replace(
+    /\n?\.dark\s*\{[^}]*--background\s*:[^}]*\}/gs,
+    ""
+  );
+
   // Inject @import url at the very top of globals.css
   cssContent = `@import url("${tokenUrl}");\n` + cssContent;
 
